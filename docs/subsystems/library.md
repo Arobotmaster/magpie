@@ -195,8 +195,16 @@ user's real agent files.
 
 The project cards and `magpie library project <kind> <dir>` list resources
 already in the folder alongside library assignments. The CLI can inspect a
-folder before it is added to the library. Assigning a library skill or
-subagent skips a matching project resource for that agent. Hook commands
+folder before it is added to the library. Project-provided entries share the
+project assignment rows' icons, names and descriptions. Their agent icons
+identify configuration readers. Long lists fold, and paths and raw hook
+commands appear in read-only details. MCP summaries show the transport.
+Skills, MCP servers, hooks, Claude plugins, Pi and subagents show project
+declarations and MagPie project assignments under separate headings with
+totals before the lists are folded. Library entries available for a project
+and other plugin sources stay outside those totals.
+Assigning a library skill or subagent skips a matching project resource for
+that agent. Hook commands
 are compared within the same agent and event. Claude can load a project's
 shared skills through recorded links in `.claude/skills`, where existing
 entries take precedence.
@@ -212,9 +220,22 @@ the project's general set.
 The project plugin card and the `library plugin` and `library project
 plugin` listings show library bundles, Claude Code installation records,
 project declarations, Codex MCP servers and Pi packages by source. An
-enable flag and an installation record describe separate facts. A session
+enable flag and an installation record describe separate facts. The card
+places status and component evidence in each source row's details. A session
 discovery value stays unknown unless there is evidence from a session
 that identifies the source.
+For a project-scoped Codex MCP or Pi package declaration, `managed` is set
+when it matches MagPie's project write records.
+
+The project CLI lists `skills`, `hook`, `server`, `subagent` and `pi`
+under Project-provided and Assigned by MagPie, with counts and per-resource
+descriptions. The two groups can contain a resource with the same name.
+`--json` keeps each command's original fields and adds a `resources` array
+with `origin` (`project` or `magpie`) and `managed` for each resource.
+The project plugin listing uses the same groups and puts inventory,
+user-scope and unresolved records under Other plugin sources. Its
+`pluginOrigins` entries keep their original `origin` and discovery fields
+and add `projectOrigin` (`project`, `magpie` or `other`) and `managed`.
 
 Use `magpie library project plugin <dir> --json` or
 `magpie library plugin project=<dir> --json` to get the `discoveryKey`

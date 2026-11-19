@@ -7054,7 +7054,7 @@ magpie.plugin("library", (ctx) => {
 
   function renderProjects(body, kind) {
     const rh = el("div", "row-head");
-    rh.append(el("span", "label", kind === "skills" ? t("Project skills") : kind === "subagents" ? t("Project subagents") : kind === "instructions" ? t("Project instructions") : kind === "hooks" ? t("Project hooks") : kind === "pi" ? t("Project Pi") : kind === "plugins" ? t("Project Claude plugins") : t("Project servers")), el("span", "grow"));
+    rh.append(el("h2", "label", kind === "skills" ? t("Project skills") : kind === "subagents" ? t("Project subagents") : kind === "instructions" ? t("Project instructions") : kind === "hooks" ? t("Project hooks") : kind === "pi" ? t("Project Pi") : kind === "plugins" ? t("Project Claude plugins") : t("Project servers")), el("span", "grow"));
     if (kind === "skills") rh.append(button(t("Sync all agents and projects"), "action lib-updall", () => change("all/sync", {})));
     if (!addingProject) rh.append(button(t("Add a project"), "action lib-updall", () => { addingProject = { dir: "" }; render(); }));
     body.append(rh);
@@ -7131,7 +7131,7 @@ magpie.plugin("library", (ctx) => {
     const isOpen = openProjects.has(p.dir);
     const head = el("div", "row lib-row click lib-projhead" + (isOpen ? " open" : ""));
     const who = el("div", "who");
-    const nm = el("div", "name", p.name);
+    const nm = el("h3", "name", p.name);
     if (p.missing) nm.append(tag(t("Folder is gone"), "warn"));
     else if (p.copy && !mcp && !sub && !ins && !hk && !pv && !cp) nm.append(tag(t("Copies"), ""));
     who.append(nm);
@@ -7171,11 +7171,15 @@ magpie.plugin("library", (ctx) => {
     card.append(head);
     if (p.problems?.[""]) card.append(el("div", "lib-err", p.problems[""]));
     if (!isOpen) return card;
-    const native = projectNativeRows(p, nativeKind);
-    if (native) card.append(native);
+    if (ins) {
+      const rows = projectNativeRows(p, nativeKind);
+      if (rows.length) card.append(el("div", "lib-aside lib-projfoot", t("Project-provided")),
+        foldedFound(nativeKind + "\n" + p.dir, rows, false, el("div")));
+      return projectInstructions(p, card);
+    }
+    if (nativeKind !== "skills" && nativeKind) appendProjectSource(card, "native", projectNativeRows(p, nativeKind), nativeKind + "\n" + p.dir);
     if (mcp) return projectServers(p, card);
     if (sub) return projectSubagents(p, card);
-    if (ins) return projectInstructions(p, card);
     if (hk) return projectHooks(p, card);
     if (pv) return projectPi(p, card);
     if (cp) return projectClaudePlugins(p, card);
@@ -7198,25 +7202,22 @@ magpie.plugin("library", (ctx) => {
     for (const s of lib.skills) if (has(s)) shown.add(s.name);
     opts.append(projectSkillsPick(p, all, has));
     card.append(opts);
+    appendProjectSource(card, "native", projectNativeRows(p, "skills"), "skills\n" + p.dir);
 
     const listed = lib.skills.filter((s) => shown.has(s.name));
-    if (!listed.length && !hasNative) card.append(el("p", "lib-aside lib-projfoot lib-projnone", t("No skills yet")));
+    const assigned = projectSkillLinkRows(p), available = [];
+    if (!listed.length && !hasNative && !assigned.length) card.append(el("p", "lib-aside lib-projfoot lib-projnone", t("No skills yet")));
     for (const s of listed) {
-      const row = el("div", "row lib-row lib-projskill");
-      const w = el("div", "who");
-      const n = el("div", "name", s.name);
       const problem = p.problems?.[s.name];
+      const [row, n] = projectResourceRow("lib-projskill", s.name, problem || s.description || "", GLYPH.skill, { icon: s.icon });
       if (problem) n.append(tag(t("Not placed"), "warn", problem));
-      w.append(n);
-      const sub = el("div", "sub", problem || s.description || "");
-      sub.title = problem || s.description || "";
-      w.append(sub);
       const on = p.skills[s.name] || [];
       // an agent reading the same folder as one that has it has it too
       const via = (a) => { const o = on.find((id) => agentOf(id)?.projectSkills === a.projectSkills); return o ? nameOf(o) : ""; };
-      row.append(mark(s.icon, GLYPH.skill), w, scopedChips(p, s, all, "skill", { via, cantOff: routedOff }));
-      card.append(row);
+      row.append(scopedChips(p, s, all, "skill", { via, cantOff: routedOff }));
+      (on.length || p.skillsOff?.[s.name]?.length ? assigned : available).push(row);
     }
+    appendProjectLibraryRows(card, assigned, available, "skills\n" + p.dir);
     const dirs = [...new Set(all.map((a) => a.projectSkills))];
     card.append(el("p", "lib-aside lib-projfoot", t("Placed in {dirs} of the project and kept out of git, its .gitignore untouched. A folder there that isn't magpie's is left as it is.", { dirs: dirs.join(", ") })));
     const skip = shownAgents().filter((a) => a.skills && !a.projectSkills);
@@ -7358,21 +7359,17 @@ magpie.plugin("library", (ctx) => {
   // chips of the agents that read a project's own servers.
   function projectServers(p, card) {
     const all = projectMCPAgents();
+    const assigned = [], available = [];
     for (const s of lib.servers) {
-      const row = el("div", "row lib-row lib-projskill lib-projserver");
-      const w = el("div", "who");
-      const n = el("div", "name mono", s.name);
       const problem = p.problems?.["mcp:" + s.name];
+      const [row, n] = projectResourceRow("lib-projskill lib-projserver", s.name, problem || serverLine(s), serverGlyph(s.transport), { icon: s.icon, mono: true, monoSub: true });
       if (problem) n.append(tag(t("Not written"), "warn", problem));
-      w.append(n);
-      const sub = el("div", "sub mono", problem || serverLine(s));
-      sub.title = problem || serverLine(s);
-      w.append(sub);
-      row.append(mark(s.icon, s.transport === "stdio" ? GLYPH.cmd : GLYPH.web), w, scopedChips(p, s, all, "server", { blocked: sseBlocked(s) }));
+      row.append(scopedChips(p, s, all, "server", { blocked: sseBlocked(s) }));
       // the project's own folder alone: its copies don't get it
       if ((p.scoped || []).includes(s.name)) n.append(tag(t("This folder only"), "lib-scope", t("Its copies in other worktrees of the repository don't get it, and the router never serves it")));
-      card.append(row);
+      (p.servers?.[s.name]?.length || p.serversOff?.[s.name]?.length ? assigned : available).push(row);
     }
+    appendProjectLibraryRows(card, assigned, available, "mcp\n" + p.dir);
     if (!lib.servers.length) card.append(el("p", "lib-aside lib-projfoot", t("No servers in the library yet")));
     card.append(el("p", "lib-aside lib-projfoot", t("Written into {files} of the project, beside what's in them; a file magpie makes is kept out of git, its .gitignore untouched. A server there by the same name that isn't magpie's is left as it is.", { files: projectFiles() })));
     card.append(el("p", "lib-aside lib-projfoot", t("Claude Code asks before it starts a project's servers; Codex reads .codex/config.toml, and Pi .pi/mcp.json, only in a project you trust.")));
@@ -7382,47 +7379,183 @@ magpie.plugin("library", (ctx) => {
     return card;
   }
 
+  const serverGlyph = (transport) => transport === "http" || transport === "sse" ? GLYPH.web : GLYPH.cmd;
+  const baseName = (path) => path.split(/[/\\]/).at(-1) || path;
+
+  function appendProjectSource(card, kind, rows, foldKey = "") {
+    if (!rows.length) return;
+    const [label, description] = {
+      native: [t("Project-provided"), t("From this project's own files. Read-only in MagPie.")],
+      assigned: [t("Assigned by MagPie"), t("Configured for this project through MagPie.")],
+      available: [t("Available from the library"), ""],
+      other: [t("Other plugin sources"), ""],
+    }[kind];
+    const group = el("section");
+    const head = el("div", "row lib-row lib-grouphead");
+    const who = el("div", "who");
+    const title = kind === "native" || kind === "assigned" ? label + " · " + rows.length : label;
+    who.append(el("h4", "name", title));
+    if (description) who.append(el("div", "sub", description));
+    head.append(who);
+    group.append(head);
+    if (foldKey) group.append(foldedFound(kind + "\n" + foldKey, rows, false, el("div")));
+    else group.append(...rows);
+    card.append(group);
+    return group;
+  }
+
+  function appendProjectLibraryRows(card, assigned, available, key) {
+    const group = appendProjectSource(card, "assigned", assigned, key);
+    appendProjectSource(card, "available", available);
+    return group;
+  }
+
+  function projectResourceRow(cls, name, description, symbol, opts = {}) {
+    const row = el("div", "row lib-row " + cls);
+    const who = el("div", "who");
+    const nm = el("div", opts.mono ? "name mono" : "name", name);
+    who.append(nm);
+    if (description !== undefined) {
+      const sub = el("div", opts.monoSub ? "sub mono" : "sub", description);
+      sub.title = description;
+      who.append(sub);
+    }
+    row.append(mark(opts.icon, symbol), who);
+    return [row, nm, who];
+  }
+
+  // The same passive icons as the library's found resources. A declaration
+  // names its readers without claiming that a session loaded it.
+  function resourceAgentIcons(ids) {
+    const have = el("div", "lib-have");
+    for (const id of new Set(ids)) {
+      const a = agentOf(id);
+      const i = agentIcon(a?.icon || "generic");
+      i.title = a?.name || id;
+      i.setAttribute("role", "img");
+      i.setAttribute("aria-label", i.title);
+      have.append(i);
+    }
+    return have;
+  }
+
+  function projectResourceDetails(row, name, ids, draw) {
+    const item = el("div");
+    item.append(row);
+    if (ids.length) row.append(resourceAgentIcons(ids));
+    let detail;
+    const more = button("", "lib-icon", () => {
+      const open = !detail;
+      if (open) {
+        detail = el("div", "lib-detail kept");
+        draw(detail);
+        item.append(detail);
+      } else {
+        detail.remove();
+        detail = null;
+      }
+      more.setAttribute("aria-expanded", String(open));
+      row.classList.toggle("open", open);
+    });
+    more.type = "button";
+    more.title = t("Details") + " · " + name;
+    more.setAttribute("aria-label", more.title);
+    more.setAttribute("aria-expanded", "false");
+    const chev = el("span", "chev", svg(CHEV_R, 11, 1.7));
+    more.append(chev);
+    row.classList.add("click");
+    row.onclick = () => more.click();
+    row.append(more);
+    return item;
+  }
+
+  function resourceSource(detail, path, source = t("Your file")) {
+    const line = el("div", "lib-src");
+    line.append(el("span", "", source));
+    if (path) {
+      const value = el("span", "lib-srclink", path);
+      value.title = path;
+      line.append(value);
+    }
+    detail.append(line);
+  }
+
   function projectNativeRows(p, kind) {
-    const rows = p.native?.[kind] || [];
-    const links = kind === "skills" ? Object.entries(p.skillLinks || {}) : [];
-    if (!rows.length && !links.length) return null;
-    const list = el("ul", "lib-project-native");
-    list.setAttribute("role", "list");
-    for (const entry of rows) {
-      const item = el("li", "lib-project-native-row");
-      const detail = [entry.path, entry.agent && nameOf(entry.agent), entry.event].filter(Boolean).join(" · ");
-      item.append(el("span", "mono", entry.name), tag(t("Project-provided"), "lib-unchecked"), el("small", "muted", detail));
-      list.append(item);
-    }
-    for (const [path, target] of links.sort(([a], [b]) => a.localeCompare(b))) {
-      const item = el("li", "lib-project-native-row");
-      item.append(el("span", "mono", path), tag(t("MagPie link"), "lib-unchecked"), el("small", "muted", target));
-      list.append(item);
-    }
-    return list;
+    const native = p.native?.[kind] || [];
+    const shapes = {
+      skills: ["lib-projskill", GLYPH.skill],
+      servers: ["lib-projskill lib-projserver", GLYPH.cmd],
+      subagents: ["lib-projskill lib-projsubagent", GLYPH.subagent],
+      hooks: ["lib-projskill lib-projhook", GLYPH.hook],
+      pi: ["lib-projskill lib-projpi", GLYPH.hook],
+      instructions: ["lib-projskill", GLYPH.doc],
+    };
+    if (!native.length) return [];
+    const [cls, symbol] = shapes[kind];
+    return native.map((entry) => {
+      const { path, agent, event, transport } = entry;
+      let name = entry.name;
+      let description = entry.description || "";
+      let ids = entry.agents || (agent ? [agent] : []);
+      if (kind === "skills") ids = projectSkillReaders(path);
+      if (kind === "hooks") {
+        // A recognizable script is a useful title. For an inline command
+        // use its event. Neither case shows shell arguments in the row.
+        const eventLabel = hookEventLabel(entry);
+        name = name.match(/(?:^|[/"'\s])([\w.-]+\.(?:sh|bash|zsh|py|js|mjs|ts|ps1))(?=["'\s;|&)]|$)/i)?.[1] || eventLabel;
+        description = name === eventLabel ? t("Hooks") : eventLabel;
+      }
+      if (kind === "servers") description = [t("MCP servers"), transport].filter(Boolean).join(" · ");
+      if (kind === "pi") {
+        name = baseName(name);
+        if (entry.name.startsWith("npm:")) name = entry.name;
+        description = t(event === "package" ? "Packages" : "Extensions");
+      }
+      if (kind === "instructions") {
+        name = baseName(name);
+        description = t("Your file");
+      }
+      if (entry.off) description += " · " + t("Off");
+      const [row] = projectResourceRow(cls, name, description, kind === "servers" ? serverGlyph(transport) : symbol,
+        { mono: kind !== "skills", monoSub: kind === "servers" });
+      return projectResourceDetails(row, name, ids, (detail) => {
+        resourceSource(detail, path);
+        if (kind === "hooks") detail.append(el("pre", "lib-md", entry.name));
+        if (kind === "pi" && entry.name !== name) resourceSource(detail, entry.name, t(event === "package" ? "Packages" : "Extensions"));
+      });
+    });
+  }
+
+  const projectSkillReaders = (path) => projectAgents().filter((a) => path.startsWith(a.projectSkills + "/")).map((a) => a.id);
+
+  function projectSkillLinkRows(p) {
+    return Object.entries(p.skillLinks || {}).sort(([a], [b]) => a.localeCompare(b)).map(([path, target]) => {
+      const name = baseName(path);
+      const [row] = projectResourceRow("lib-projskill", name, t("MagPie link"), GLYPH.skill);
+      return projectResourceDetails(row, name, projectSkillReaders(path), (detail) => {
+        resourceSource(detail, path, t("MagPie link"));
+        detail.append(el("pre", "lib-md", target));
+      });
+    });
   }
 
   // The project's card, open on the Subagents tab: each library subagent
   // with the chips of the agents that read a project's own subagent folder.
   function projectSubagents(p, card) {
     const all = shownAgents().filter((a) => a.projectSubagents);
+    const assigned = [], available = [];
     for (const s of lib.subagents || []) {
-      const row = el("div", "row lib-row lib-projskill lib-projsubagent");
-      const w = el("div", "who");
-      const n = el("div", "name mono", s.name);
       const problem = p.problems?.["subagent:" + s.name];
+      const [row, n] = projectResourceRow("lib-projskill lib-projsubagent", s.name, problem || s.description || "", GLYPH.subagent, { mono: true });
       if (problem) n.append(tag(t("Not written"), "warn", problem));
-      w.append(n);
-      const sub = el("div", "sub", problem || s.description || "");
-      sub.title = problem || s.description || "";
-      w.append(sub);
       const on = (p.subagents?.[s.name] || []).filter((id) => all.some((a) => a.id === id));
       const say = (next) => next.length
         ? t("{item} is in {name} for {agents}", { item: s.name, name: p.name, agents: next.map(nameOf).join(", ") })
         : t("{item} is out of {name}", { item: s.name, name: p.name });
-      row.append(glyph(GLYPH.subagent), w, agentChips(all, on, projectChange("projects/subagents", p.dir, s.name, say)));
-      card.append(row);
+      row.append(agentChips(all, on, projectChange("projects/subagents", p.dir, s.name, say)));
+      (p.subagents?.[s.name]?.length ? assigned : available).push(row);
     }
+    appendProjectLibraryRows(card, assigned, available, "subagents\n" + p.dir);
     if (!(lib.subagents || []).length) card.append(el("p", "lib-aside lib-projfoot", t("No subagents in the library yet")));
     card.append(el("p", "lib-aside lib-projfoot", t("Written into the project's own agents folder, one file per subagent; a file magpie makes is kept out of git, its .gitignore untouched. A file there by the same name that isn't magpie's is left as it is.")));
     return card;
@@ -7433,16 +7566,11 @@ magpie.plugin("library", (ctx) => {
   // magpie wrote the entry (#6874).
   function projectHooks(p, card) {
     const all = shownAgents().filter((a) => a.projectHooks);
+    const assigned = [], available = [], written = [];
     for (const h of lib.hooks || []) {
-      const row = el("div", "row lib-row lib-projskill lib-projhook");
-      const w = el("div", "who");
-      const n = el("div", "name mono", h.name);
       const problem = p.problems?.["hook:" + h.name];
+      const [row, n, w] = projectResourceRow("lib-projskill lib-projhook", h.name, problem || h.description || "", GLYPH.hook, { mono: true });
       if (problem) n.append(tag(t("Not written"), "warn", problem));
-      w.append(n);
-      const sub = el("div", "sub", problem || h.description || "");
-      sub.title = problem || h.description || "";
-      w.append(sub);
       const cmd = el("div", "sub mono lib-hookcmd", h.command);
       cmd.title = h.command;
       w.append(cmd);
@@ -7450,12 +7578,13 @@ magpie.plugin("library", (ctx) => {
       const say = (next) => next.length
         ? t("{item} is in {name} for {agents}", { item: h.name, name: p.name, agents: next.map(nameOf).join(", ") })
         : t("{item} is out of {name}", { item: h.name, name: p.name });
-      row.append(glyph(GLYPH.hook), w, agentChips(all, on, projectChange("projects/hooks", p.dir, h.name, say)));
-      card.append(row);
+      row.append(agentChips(all, on, projectChange("projects/hooks", p.dir, h.name, say)));
+      (p.hooks?.[h.name]?.length ? assigned : available).push(row);
       // where magpie wrote it, so the file is not a guess
       const places = (p.hookFiles || []).filter((f) => f.name === h.name).map((f) => f.path + ":" + f.event);
-      if (places.length) card.append(el("p", "lib-aside lib-projfoot", t("Written as {places}", { places: places.join(", ") })));
+      if (places.length) written.push(el("p", "lib-aside lib-projfoot", t("Written as {places}", { places: places.join(", ") })));
     }
+    (appendProjectLibraryRows(card, assigned, available, "hooks\n" + p.dir) || card).append(...written);
     if (!(lib.hooks || []).length) card.append(el("p", "lib-aside lib-projfoot", t("No hooks in the library yet")));
     card.append(el("p", "lib-aside lib-projfoot", t("Written into the project's own hooks file, one entry per hook: .claude/settings.local.json for Claude Code, .codex/hooks.json for Codex. Your own entries in those files are left as they are, and an entry magpie wrote that you change is yours from then on.")));
     card.append(el("p", "lib-aside lib-projfoot", t("Codex runs a project's hook only once you trust it: review it in Codex's /hooks.")));
@@ -7468,20 +7597,15 @@ magpie.plugin("library", (ctx) => {
   // magpie wrote into the project's own .pi/settings.json.
   function projectPi(p, card) {
     const entries = p.piEntries || [];
+    const assigned = [];
     for (const kind of ["package", "extension"]) {
       const rows = entries.filter((e) => e.kind === kind);
-      if (!rows.length) continue;
-      card.append(el("div", "row-head lib-hookhead", el("span", "label", kind === "package" ? t("Packages") : t("Extensions"))));
       for (const e of rows) {
-        const row = el("div", "row lib-row lib-projpi");
-        const w = el("div", "who");
-        const nm = el("div", "name mono", e.source);
+        const [row, nm, w] = projectResourceRow("lib-projskill lib-projpi", e.source, t(kind === "package" ? "Packages" : "Extensions"), GLYPH.hook, { mono: true });
         // a project's role, not its copies' (project_role.go)
         if (e.scope === "project") nm.append(tag(t("This folder only"), "lib-scope", t("A worktree of this repository doesn't load it: magpie keeps the .pi/settings.json it made out of git for it")));
-        w.append(nm);
         const problem = p.problems?.["pi:" + e.source];
         if (problem) w.append(el("div", "sub lib-err", problem));
-        row.append(glyph(GLYPH.box || GLYPH.hook), w);
         // where it belongs: the project's set, or its own folder alone
         const scopeBox = el("div", "lib-scopebox lib-piscope");
         const drawScope = () => scopeBox.replaceChildren(segs([["", t("The project's set")], ["project", t("The project's own folder")]], e.scope === "project" ? "project" : "", (v) =>
@@ -7503,9 +7627,10 @@ magpie.plugin("library", (ctx) => {
         rm.append(svg(GLYPH.trash, 13, 1.4));
         rm.title = t("Take it out of the project");
         row.append(rm);
-        card.append(row);
+        assigned.push(row);
       }
     }
+    appendProjectSource(card, "assigned", assigned, "pi\n" + p.dir);
     if (!entries.length && !p.native?.pi?.length) card.append(el("p", "lib-aside lib-projfoot", t("No Pi packages or extensions of its own yet")));
     card.append(el("p", "lib-aside lib-projfoot", t("Written into the project's own .pi/settings.json, which Pi reads beside the folder it runs in; every other key there and every entry you wrote are left as they are. A package is installed by Pi itself when it next starts.")));
     card.append(el("p", "lib-aside lib-projfoot", t("{file} is not kept out of git by itself, so a commit carries it into every worktree of the repository, where Pi loads it for an ordinary copy. Set an entry to The project's own folder for that not to happen: with every entry so set, magpie keeps the file out of git when magpie made it. A file you already had is left alone — add it to the project's .gitignore or `git rm --cached` it yourself.", { file: ".pi/settings.json" })));
@@ -7517,37 +7642,60 @@ magpie.plugin("library", (ctx) => {
   // or off in its own .claude/settings.local.json. The plugin itself is
   // installed by Claude Code's own CLI.
   function projectClaudePlugins(p, card) {
-    const sources = el("div", "lib-plugin-origins", t("Reading plugin sources…"));
-    sources.setAttribute("aria-live", "polite");
+    const sources = el("div");
+    const notice = el("div", "lib-aside lib-projfoot", t("Reading plugin sources…"));
+    notice.setAttribute("aria-live", "polite");
+    sources.append(notice);
+    appendProjectSource(sources, "assigned", projectClaudePluginRows(p), "plugins\n" + p.dir);
     card.append(sources);
     api("library/projects/plugin-origins?dir=" + encodeURIComponent(p.dir)).then((rows) => {
       if (!Array.isArray(rows)) throw new Error(t("Could not read plugin sources"));
-      sources.replaceChildren();
-      if (!rows.length) sources.append(el("p", "lib-aside", t("No plugin sources found")));
-      for (const entry of rows) sources.append(pluginOriginRow(entry));
-    }).catch((e) => sources.replaceChildren(el("p", "lib-err", e.message)));
-    const ids = Object.keys(p.claudePlugins || {}).sort();
-    for (const id of ids) {
-      const on = !!p.claudePlugins[id];
-      const row = el("div", "row lib-row lib-projplugin");
-      const w = el("div", "who");
-      w.append(el("div", "name mono", id));
-      w.append(el("div", "sub", on ? t("On in this project") : t("Off in this project")));
-      row.append(glyph(GLYPH.skill), w, toggle(on, t("On in this project"), () =>
-        change("projects/claude-plugin", { dir: p.dir, id, on: !on }, !on
-          ? t("{plugin} is on in {name}", { plugin: id, name: p.name })
-          : t("{plugin} is off in {name}", { plugin: id, name: p.name }))));
-      card.append(row);
-    }
+      if (!rows.length) { notice.textContent = t("No plugin sources found"); return; }
+      const own = [], assigned = [], other = [], records = new Map();
+      for (const entry of rows) {
+        if (entry.scope !== "project" && entry.scope !== "local") {
+          other.push(pluginOriginRow(p.dir, entry));
+        } else if (entry.origin === "library" && Object.hasOwn(p.claudePlugins || {}, entry.name)) {
+          records.set(entry.name, entry);
+        } else {
+          (entry.managed || entry.origin === "library" ? assigned : own).push(pluginOriginRow(p.dir, entry));
+        }
+      }
+      const next = el("div");
+      const key = "plugins\n" + p.dir;
+      appendProjectSource(next, "native", own, key);
+      appendProjectSource(next, "assigned", [...projectClaudePluginRows(p, records), ...assigned], key);
+      appendProjectSource(next, "other", other, key);
+      sources.replaceWith(next);
+    }).catch((e) => notice.replaceChildren(el("p", "lib-err", e.message)));
     card.append(el("p", "lib-aside lib-projfoot", t("Written into the project's own .claude/settings.local.json, which Claude Code reads for this folder and which wins over your user settings. Every other key there, and any value you set yourself, is left as it is. Install the plugin itself with Claude Code's own plugin command.")));
     return card;
   }
 
-  function pluginOriginRow(entry) {
-    const label = {
-      library: "MagPie library", "claude-native": "Claude Code native",
-      project: "Project-provided", "codex-mcp": "Independent Codex MCP", "pi-package": "Pi native package",
-    }[entry.origin];
+  function projectClaudePluginRows(p, records = new Map()) {
+    return Object.keys(p.claudePlugins || {}).sort().map((id) => {
+      const on = !!p.claudePlugins[id];
+      const [row] = projectResourceRow("lib-projskill lib-projplugin", id, on ? t("On in this project") : t("Off in this project"), GLYPH.skill, { mono: true });
+      row.append(toggle(on, t("On in this project"), () =>
+        change("projects/claude-plugin", { dir: p.dir, id, on: !on }, !on
+          ? t("{plugin} is on in {name}", { plugin: id, name: p.name })
+          : t("{plugin} is off in {name}", { plugin: id, name: p.name }))));
+      const record = records.get(id);
+      return record ? projectResourceDetails(row, id, [record.agent].filter(Boolean),
+        (detail) => pluginOriginDetails(p.dir, record, detail)) : row;
+    });
+  }
+
+  const pluginSourceLabel = (entry) => t({
+    library: "MagPie library", "claude-native": "Claude Code native",
+    project: "Project-provided", "codex-mcp": "Independent Codex MCP", "pi-package": "Pi native package",
+  }[entry.origin]);
+  const pluginPartKinds = {
+    skill: ["Skills", GLYPH.skill], hook: ["Hooks", GLYPH.hook], subagent: ["Subagents", GLYPH.subagent],
+    mcp: ["MCP servers", GLYPH.cmd], package: ["Packages", GLYPH.hook],
+  };
+
+  function pluginOriginDetails(dir, entry, detail) {
     const scope = { library: "Library scope", user: "User scope", project: "Project scope", local: "Local project scope" }[entry.scope];
     const state = (value) => value == null ? t("Unknown") : value ? t("Yes") : t("No");
     const statusLine = (value) => [
@@ -7556,29 +7704,31 @@ magpie.plugin("library", (ctx) => {
       t("Session discovery") + " " + state(value.discovered),
     ].join(" · ");
     const parts = entry.parts || [];
-    const kindName = { skill: "Skills", hook: "Hooks", subagent: "Subagents", mcp: "MCP servers", package: "Packages" };
-    const counts = Object.entries(kindName).map(([kind, title]) => {
+    resourceSource(detail, entry.source, [pluginSourceLabel(entry), t(scope || "Unknown")].join(" · "));
+    detail.append(el("p", "lib-aside", statusLine(entry)));
+    if (!parts.length) return;
+    const key = JSON.stringify([dir, entry.origin, entry.scope, entry.source, entry.name, entry.version, entry.agent]);
+    const rows = parts.map((part) => {
+      const [title, glyph] = pluginPartKinds[part.kind] || [part.kind, GLYPH.doc];
+      const [item] = projectResourceRow("", part.name, t(title) + " · " + statusLine(part), glyph, { mono: true });
+      if (part.agent) item.append(resourceAgentIcons([part.agent]));
+      return item;
+    });
+    detail.append(foldedFound(key, rows, false, el("div", "list lib-list")));
+  }
+
+  function pluginOriginRow(dir, entry) {
+    const parts = entry.parts || [];
+    const counts = Object.entries(pluginPartKinds).map(([kind, [title]]) => {
       const n = new Set(parts.filter((x) => x.kind === kind).map((x) => x.name)).size;
       return n ? t(title) + " " + n : "";
     }).filter(Boolean);
-    const row = el("details", "lib-plugin-origin");
-    const head = el("summary", "", entry.name);
-    head.append(el("span", "lib-plugin-origin-sub", [t(label), entry.agent && nameOf(entry.agent), t(scope || "Unknown"), entry.version, ...counts].filter(Boolean).join(" · ")),
-      el("span", "lib-plugin-origin-sub", statusLine(entry)));
-    row.append(head);
-    if (entry.source) row.append(el("p", "mono lib-aside", entry.source));
-    if (parts.length) {
-      const list = el("ul", "lib-project-native");
-      list.setAttribute("role", "list");
-      for (const part of parts) {
-        const item = el("li", "lib-project-native-row");
-        item.append(el("span", "mono", [t(kindName[part.kind] || part.kind), part.name, part.agent && nameOf(part.agent)].filter(Boolean).join(" · ")),
-          el("small", "", statusLine(part)));
-        list.append(item);
-      }
-      row.append(list);
-    }
-    return row;
+    const name = entry.name + (entry.version ? " " + entry.version : "");
+    const description = [pluginSourceLabel(entry), ...counts, entry.enabled === false ? t("Off") : ""].filter(Boolean).join(" · ");
+    const symbol = entry.origin === "codex-mcp" ? GLYPH.cmd : entry.origin === "pi-package" ? GLYPH.hook : GLYPH.folder;
+    const [row] = projectResourceRow("lib-projskill lib-projplugin", name, description, symbol, { mono: true });
+    const ids = entry.agent ? [entry.agent] : parts.filter((part) => part.agent && part.enabled === true).map((part) => part.agent);
+    return projectResourceDetails(row, name, ids, (detail) => pluginOriginDetails(dir, entry, detail));
   }
 
   // The agents a project's first instructions are for: those here that
@@ -8937,25 +9087,27 @@ magpie.plugin("library", (ctx) => {
   // there are, so it doesn't push everything under it a screen down
   const FOUND_SHOWN = 5;
   const foundOpen = new Set(); // "skills", "mcp": shown whole, for this session
-  function foldedFound(kind, rows, whole) {
-    const list = el("div", "list lib-list");
+  function foldedFound(kind, rows, whole, container) {
+    const list = container || el("div", "list lib-list");
     // two or fewer hidden aren't worth a click
     const folds = !whole && rows.length > FOUND_SHOWN + 2;
-    const open = !folds || foundOpen.has(kind);
-    list.append(...(open ? rows : rows.slice(0, FOUND_SHOWN)));
-    if (!folds) return list;
+    if (!folds) { list.append(...rows); return list; }
     const more = el("button", "lib-foundmore");
     more.type = "button";
-    const chev = el("span", "chev");
-    chev.append(svg(CHEV, 10, 1.8));
-    more.append(el("span", "", open ? t("Show less") : t("Show {n} more", { n: rows.length - FOUND_SHOWN })), chev);
-    more.classList.toggle("open", open);
-    more.setAttribute("aria-expanded", String(open));
-    more.onclick = () => {
-      if (open) foundOpen.delete(kind); else foundOpen.add(kind);
-      render();
+    const label = el("span");
+    more.append(label, el("span", "chev", svg(CHEV, 10, 1.8)));
+    const draw = () => {
+      const open = foundOpen.has(kind);
+      label.textContent = open ? t("Show less") : t("Show {n} more", { n: rows.length - FOUND_SHOWN });
+      more.classList.toggle("open", open);
+      more.setAttribute("aria-expanded", String(open));
+      replaceKeeping(list, [...(open ? rows : rows.slice(0, FOUND_SHOWN)), more]);
     };
-    list.append(more);
+    more.onclick = () => {
+      if (foundOpen.has(kind)) foundOpen.delete(kind); else foundOpen.add(kind);
+      if (container) draw(); else render();
+    };
+    draw();
     return list;
   }
 

@@ -189,34 +189,3 @@ func hookPlaces(p *library.ProjectView, name string) []string {
 	sort.Strings(out)
 	return out
 }
-
-// listProjectHooks prints one project's hooks, for which agents, and the
-// entries magpie wrote for each.
-func listProjectHooks(dir string) error {
-	p, err := library.ReadProject(dir)
-	if err != nil {
-		return err
-	}
-	names := make([]string, 0, len(p.Hooks))
-	for n := range p.Hooks {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	fmt.Println(bold.Render(p.Name) + " " + muted.Render(p.Dir) + " " + muted.Render("hooks"))
-	printProjectNative(p, "hooks")
-	if len(names) == 0 && len(p.Native["hooks"]) == 0 {
-		fmt.Println(" ", muted.Render("no hooks yet · magpie library project hook add "+quoteArg(p.Dir)+" <hook…>"))
-		return nil
-	}
-	for _, n := range names {
-		places := hookPlaces(p, n)
-		line := fmt.Sprintf("  %s → %s", bold.Render(n), strings.Join(p.Hooks[n], ", "))
-		if why := p.Problems["hook:"+n]; why != "" {
-			fmt.Printf("%s %s\n", amber.Render("!"), bold.Render(line))
-			fmt.Println("   ", muted.Render(why))
-			continue
-		}
-		fmt.Printf("%s %s\n", line, muted.Render(strings.Join(places, " ")))
-	}
-	return nil
-}

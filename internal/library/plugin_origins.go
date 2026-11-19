@@ -36,6 +36,7 @@ type PluginOrigin struct {
 	Origin       string            `json:"origin"`
 	Agent        string            `json:"agent,omitempty"`
 	Scope        string            `json:"scope"`
+	Managed      bool              `json:"managed,omitempty"` // the project declaration is recorded as MagPie's
 	Source       string            `json:"source,omitempty"`
 	Version      string            `json:"version,omitempty"`
 	DiscoveryKey string            `json:"discoveryKey,omitempty"`
@@ -369,7 +370,8 @@ func codexMCPOrigins(p *Project) []PluginOrigin {
 	for _, name := range slices.Sorted(maps.Keys(entries)) {
 		value, set := entries[name]["enabled"].(bool)
 		on := new(!set || value)
-		rows = append(rows, PluginOrigin{Name: name, Origin: "codex-mcp", Agent: "codex", Scope: scope, Source: path,
+		managed := p != nil && (slices.Contains(p.Wrote[rel], name) || slices.Contains(p.CodexOff, name))
+		rows = append(rows, PluginOrigin{Name: name, Origin: "codex-mcp", Agent: "codex", Scope: scope, Source: path, Managed: managed,
 			PluginStatus: PluginStatus{Enabled: on},
 			Parts:        []PluginPartState{{Kind: "mcp", Name: name, Agent: "codex", PluginStatus: PluginStatus{Enabled: on}}}})
 	}
@@ -410,7 +412,8 @@ func piPluginOrigins(p *Project) []PluginOrigin {
 			pkg.Source = src
 			installed, version := place.installed(pkg)
 			state := PluginStatus{Installed: new(installed), Enabled: new(piEntryOn("package", raw))}
-			out = append(out, PluginOrigin{Name: src, Origin: "pi-package", Agent: "pi", Scope: scope, Source: path, Version: version,
+			managed := scope == "project" && p.ownsPiDeclaration("package", src, raw)
+			out = append(out, PluginOrigin{Name: src, Origin: "pi-package", Agent: "pi", Scope: scope, Source: path, Version: version, Managed: managed,
 				PluginStatus: state, Parts: []PluginPartState{{Kind: "package", Name: src, Agent: "pi", PluginStatus: state}}})
 		}
 	}

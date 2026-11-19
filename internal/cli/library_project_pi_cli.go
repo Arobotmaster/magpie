@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/yetone/magpie/internal/library"
@@ -73,10 +72,7 @@ func libraryProjectPiCmd(rest []string, usage func() error, options library.Proj
 		if len(rest) != 1 || strings.HasPrefix(rest[0], "-") {
 			return usage()
 		}
-		if asJSON {
-			return listProjects(rest[0], true)
-		}
-		return listProjectPi(rest[0])
+		return listProjectResources(rest[0], "pi", asJSON)
 	}
 	verb, args := rest[0], rest[1:]
 	if len(args) < 2 || strings.HasPrefix(args[0], "-") {
@@ -155,46 +151,6 @@ func libraryProjectPiCmd(rest []string, usage func() error, options library.Proj
 	return nil
 }
 
-// listProjectPi prints one project's Pi packages and extensions, and which
-// magpie wrote into the project's own settings.
-func listProjectPi(dir string) error {
-	p, err := library.ReadProject(dir)
-	if err != nil {
-		return err
-	}
-	fmt.Println(bold.Render(p.Name) + " " + muted.Render(p.Dir) + " " + muted.Render("Pi"))
-	printProjectNative(p, "pi")
-	if len(p.PiEntries) == 0 && len(p.Native["pi"]) == 0 {
-		fmt.Println(" ", muted.Render("no Pi packages or extensions yet · magpie library project pi add "+quoteArg(p.Dir)+" package|extension <source…>"))
-		return nil
-	}
-	for _, kind := range []string{"package", "extension"} {
-		var rows []string
-		for _, e := range p.PiEntries {
-			if e.Kind == kind {
-				rows = append(rows, e.Source)
-			}
-		}
-		if len(rows) == 0 {
-			continue
-		}
-		sort.Strings(rows)
-		fmt.Printf("  %s %s\n", bold.Render(kind+"s"), muted.Render(library.ProjectPiSettings("pi")))
-		for _, s := range rows {
-			if why := p.Problems["pi:"+s]; why != "" {
-				fmt.Printf("    %s %s %s\n", amber.Render("!"), s, muted.Render(why))
-				continue
-			}
-			scope := ""
-			if slices.Contains(p.PiScoped[kind], s) {
-				scope = muted.Render(" (project scope)")
-			}
-			fmt.Printf("    %s%s\n", s, scope)
-		}
-	}
-	return nil
-}
-
 // libraryProjectPluginCmd is magpie library project plugin …: the Claude
 // Code plugins a project turns on or off in its own settings.local.json.
 func libraryProjectPluginCmd(rest []string, usage func() error, options library.ProjectWriteOptions) error {
@@ -246,13 +202,5 @@ func listProjectPlugins(dir string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	if asJSON {
-		return printJSON(struct {
-			*library.ProjectView
-			PluginOrigins []library.PluginOrigin `json:"pluginOrigins"`
-		}{p, rows})
-	}
-	fmt.Println(bold.Render(p.Name) + " " + muted.Render(p.Dir) + " " + muted.Render("plugin sources"))
-	printPluginOrigins(rows)
-	return nil
+	return printProjectPluginSources(p, rows, asJSON)
 }

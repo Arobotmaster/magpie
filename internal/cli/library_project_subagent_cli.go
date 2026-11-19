@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/yetone/magpie/internal/library"
@@ -51,10 +50,7 @@ func libraryProjectSubagentCmd(rest []string, usage func() error, options librar
 		}
 	}
 	if verb == "list" {
-		if slices.Contains(rest, "--json") {
-			return listProjectSubagentsJSON(args[0])
-		}
-		return listProjectSubagents(args[0])
+		return listProjectResources(args[0], "subagents", slices.Contains(rest, "--json"))
 	}
 	dir, err := projectDir(args[0])
 	if err != nil {
@@ -184,51 +180,4 @@ func subagentPlaces(p *library.ProjectView, n string) []string {
 		}
 	}
 	return out
-}
-
-// listProjectSubagents prints a project's subagents: which agents each is for,
-// and the file magpie wrote.
-func listProjectSubagents(dir string) error {
-	p, err := library.ReadProject(dir)
-	if err != nil {
-		return err
-	}
-	names := make([]string, 0, len(p.Subagents))
-	for n := range p.Subagents {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	fmt.Println(bold.Render(p.Name) + " " + muted.Render(p.Dir) + " " + muted.Render("subagents"))
-	printProjectNative(p, "subagents")
-	if len(names) == 0 && len(p.Native["subagents"]) == 0 {
-		fmt.Println(" ", muted.Render("no subagents yet · magpie library project subagents add "+quoteArg(p.Dir)+" <name…>"))
-		return nil
-	}
-	for _, n := range names {
-		line := fmt.Sprintf("  %s → %s", bold.Render(n), strings.Join(p.Subagents[n], ", "))
-		if why := p.Problems["subagent:"+n]; why != "" {
-			fmt.Printf("%s %s\n", amber.Render("!"), bold.Render(line))
-			fmt.Println("   ", muted.Render(why))
-			continue
-		}
-		fmt.Printf("%s %s\n", line, muted.Render(strings.Join(subagentPlaces(p, n), " ")))
-	}
-	return nil
-}
-
-// listProjectSubagentsJSON prints a project the way `… projects --json` does,
-// so a script reads its subagents and the files magpie wrote from one object.
-func listProjectSubagentsJSON(dir string) error {
-	p, err := library.ReadProject(dir)
-	if err != nil {
-		return err
-	}
-	return printJSON([]any{map[string]any{
-		"native":     p.Native["subagents"],
-		"dir":        p.Dir,
-		"name":       p.Name,
-		"subagents":  p.Subagents,
-		"agentFiles": p.AgentFiles,
-		"problems":   p.Problems,
-	}})
 }

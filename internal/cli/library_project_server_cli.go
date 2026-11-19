@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/yetone/magpie/internal/library"
@@ -45,10 +44,7 @@ func libraryProjectServerCmd(rest []string, usage func() error, options library.
 		}
 	}
 	if verb == "list" {
-		if slicesContains(rest, "--json") {
-			return listProjectServersJSON(args[0])
-		}
-		return listProjectServers(args[0])
+		return listProjectResources(args[0], "servers", slicesContains(rest, "--json"))
 	}
 	dir, err := projectDir(args[0])
 	if err != nil {
@@ -147,41 +143,4 @@ func projectServerAgents(s string) ([]string, error) {
 		}
 	}
 	return out, nil
-}
-
-// listProjectServers prints a project's MCP servers and who has each.
-func listProjectServers(dir string) error {
-	p, err := library.ReadProject(dir)
-	if err != nil {
-		return err
-	}
-	names := make([]string, 0, len(p.Servers))
-	for n := range p.Servers {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	fmt.Println(bold.Render(p.Name) + " " + muted.Render(p.Dir) + " " + muted.Render("servers"))
-	printProjectNative(p, "servers")
-	if len(names) == 0 && len(p.Native["servers"]) == 0 {
-		fmt.Println(" ", muted.Render("no servers yet · magpie library project server add "+quoteArg(p.Dir)+" <name> [agents=a,b…]"))
-		return nil
-	}
-	for _, n := range names {
-		fmt.Printf("  %s → %s\n", bold.Render(n), strings.Join(p.Servers[n], ", "))
-	}
-	return nil
-}
-
-// listProjectServersJSON prints the project's servers as `… projects --json` does.
-func listProjectServersJSON(dir string) error {
-	p, err := library.ReadProject(dir)
-	if err != nil {
-		return err
-	}
-	return printJSON([]any{map[string]any{
-		"native":  p.Native["servers"],
-		"dir":     p.Dir,
-		"name":    p.Name,
-		"servers": p.Servers,
-	}})
 }

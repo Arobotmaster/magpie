@@ -21,7 +21,7 @@ func TestProjectNativeResourcesAndClaudeLinks(t *testing.T) {
 	skill(t, existing, "existing", "Claude local")
 	skill(t, filepath.Join(project, ".agents/skills/existing"), "existing", "Shared")
 	const mcp = `{"mcpServers":{"local":{"command":"local-test"}}}`
-	const pi = `{"packages":["./example"],"extensions":["./extra.ts"]}`
+	const pi = `{"packages":["-./example"],"extensions":["./extra.ts"]}`
 	const instructions = "Project's instructions\n"
 	write(t, filepath.Join(project, ".mcp.json"), mcp)
 	write(t, filepath.Join(project, ".pi/settings.json"), pi)
@@ -43,6 +43,15 @@ func TestProjectNativeResourcesAndClaudeLinks(t *testing.T) {
 	if len(views.Native["skills"]) != 3 || len(views.Native["servers"]) == 0 || len(views.Native["pi"]) != 2 ||
 		len(views.Native["instructions"]) != 1 || len(views.SkillLinks) != 1 || len(views.Placed) != 0 {
 		t.Fatalf("unexpected ownership: native=%v linked=%v placed=%v", views.Native, views.SkillLinks, views.Placed)
+	}
+	if !slices.ContainsFunc(views.Native["skills"], func(r ProjectResource) bool {
+		return r.Name == "pdf" && r.Description == "Project PDF"
+	}) || !slices.ContainsFunc(views.Native["servers"], func(r ProjectResource) bool {
+		return r.Name == "local" && r.Transport == "stdio"
+	}) || !slices.ContainsFunc(views.Native["pi"], func(r ProjectResource) bool {
+		return r.Name == "./example" && r.Off
+	}) || !slices.Contains(views.Native["instructions"][0].Agents, "codex") {
+		t.Fatalf("missing project resource summaries: %+v", views.Native)
 	}
 	ok(t)(RemoveProject(project, false))
 	gone(t, claude)
@@ -83,7 +92,9 @@ func TestProjectNativeHookAndRoleDedup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.ContainsFunc(view.Native["subagents"], func(e ProjectResource) bool { return e.Name == "reviewer" && e.Agent == "claude" }) ||
+	if !slices.ContainsFunc(view.Native["subagents"], func(e ProjectResource) bool {
+		return e.Name == "reviewer" && e.Agent == "claude" && e.Description == "project role"
+	}) ||
 		!slices.ContainsFunc(view.Native["hooks"], func(e ProjectResource) bool { return e.Name == "say done" && e.Event == "Stop" }) {
 		t.Fatalf("expected project-provided role and hook: %+v", view.Native)
 	}

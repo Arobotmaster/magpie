@@ -17,20 +17,31 @@ import (
 // ReadProject inspects even an unenrolled folder, without adding it or
 // writing to its configuration.
 func ReadProject(dir string) (*ProjectView, error) {
+	p, _, err := readProject(dir, "")
+	return p, err
+}
+
+// ReadProjectDescriptions reads the project and the relevant descriptions
+// from the same library snapshot, without syncing or enrolling the folder.
+func ReadProjectDescriptions(dir, kind string) (*ProjectView, map[string]string, error) {
+	return readProject(dir, kind)
+}
+
+func readProject(dir, kind string) (*ProjectView, map[string]string, error) {
 	dir, err := ProjectPath(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	l, err := load()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	p := l.project(dir)
 	if p == nil {
 		if !isDir(dir) {
-			return nil, fmt.Errorf("%s isn't a project folder", dir)
+			return nil, nil, fmt.Errorf("%s isn't a project folder", dir)
 		}
 		key := realDir(dir)
 		for _, candidate := range l.Projects {
@@ -49,15 +60,60 @@ func ReadProject(dir string) (*ProjectView, error) {
 	}
 	l.Projects = []*Project{p}
 	views := projectViews(l, nil)
-	return &views[0], nil
+	return &views[0], l.projectDescriptions(p, kind), nil
+}
+
+func (l *Library) projectDescriptions(p *Project, kind string) map[string]string {
+	d := map[string]string{}
+	switch kind {
+	case "skills":
+		for n := range p.Skills {
+			if m, ok := readMeta(skillDir(n)); ok {
+				d[n] = m.Description
+			}
+		}
+		for n := range p.SkillsOff {
+			if _, found := d[n]; !found {
+				if m, ok := readMeta(skillDir(n)); ok {
+					d[n] = m.Description
+				}
+			}
+		}
+	case "hooks":
+		for n := range p.Hooks {
+			if h := l.hook(n); h != nil {
+				d[n] = h.Description
+				if d[n] == "" {
+					d[n] = h.Event
+				}
+			}
+		}
+	case "servers":
+		for _, s := range l.MCP {
+			if len(p.Servers[s.Name])+len(p.ServersOff[s.Name]) > 0 {
+				d[s.Name] = s.Transport
+			}
+		}
+	case "subagents":
+		for n := range p.Subagents {
+			if s := l.subagent(n); s != nil {
+				d[n] = s.Description
+			}
+		}
+	}
+	return d
 }
 
 // ProjectResource describes an entry already supplied by the project.
 type ProjectResource struct {
-	Name  string `json:"name"`
-	Path  string `json:"path"`
-	Agent string `json:"agent,omitempty"`
-	Event string `json:"event,omitempty"`
+	Name        string   `json:"name"`
+	Path        string   `json:"path"`
+	Agent       string   `json:"agent,omitempty"`
+	Event       string   `json:"event,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Agents      []string `json:"agents,omitempty"`
+	Transport   string   `json:"transport,omitempty"`
+	Off         bool     `json:"off,omitempty"`
 }
 
 func (p *Project) nativeSkills(rel string) []ProjectResource {
@@ -79,7 +135,7 @@ func (p *Project) nativeSkills(rel string) []ProjectResource {
 			if m.Name != "" {
 				name = m.Name
 			}
-			out = append(out, ProjectResource{Name: name, Path: path})
+			out = append(out, ProjectResource{Name: name, Path: path, Description: m.Description})
 		}
 	}
 	return out
@@ -110,17 +166,17 @@ func (p *Project) nativeSubagents(id string) []ProjectResource {
 		}) {
 			continue
 		}
-		name := parseMeta(body).Name
+		meta := parseMeta(body)
 		if sp.ext == ".toml" {
-			var role struct{ Name string }
+			var role struct{ Name, Description string }
 			if toml.Unmarshal(body, &role) == nil {
-				name = role.Name
+				meta.Name, meta.Description = role.Name, role.Description
 			}
 		}
-		if name == "" {
-			name = strings.TrimSuffix(e.Name(), sp.ext)
+		if meta.Name == "" {
+			meta.Name = strings.TrimSuffix(e.Name(), sp.ext)
 		}
-		out = append(out, ProjectResource{Name: name, Path: rel, Agent: id})
+		out = append(out, ProjectResource{Name: meta.Name, Path: rel, Agent: id, Description: meta.Description})
 	}
 	return out
 }
@@ -211,13 +267,23 @@ func (p *Project) nativeResources() map[string][]ProjectResource {
 		if p.inside(abs) != nil {
 			continue
 		}
-		entries, err := (&mcpFile{Path: abs, Format: format}).entries()
+		file := &mcpFile{Path: abs, Format: format}
+		entries, err := file.entries()
 		if err != nil {
 			continue
 		}
-		for name := range entries {
+		for name, entry := range entries {
 			if !slices.Contains(p.Wrote[rel], name) && !(id == "codex" && slices.Contains(p.CodexOff, name)) {
-				out["servers"] = append(out["servers"], ProjectResource{Name: name, Path: rel, Agent: id})
+				row := ProjectResource{Name: name, Path: rel, Agent: id}
+				// Only expose the transport. Configured URLs, arguments and
+				// environment values can carry credentials.
+				if server, ok := file.decode(name, entry); ok {
+					row.Transport = server.Transport
+				}
+				if enabled, ok := entry["enabled"].(bool); ok && (format == fmtCodex || format == fmtOpenCode) {
+					row.Off = !enabled
+				}
+				out["servers"] = append(out["servers"], row)
 			}
 		}
 	}
@@ -225,10 +291,8 @@ func (p *Project) nativeResources() map[string][]ProjectResource {
 		if config, err := readPiProject(p.Dir); err == nil {
 			for _, kind := range []string{"package", "extension"} {
 				for _, raw := range config.entries(kind) {
-					if s, ok := piSourceOf(raw); ok && !slices.ContainsFunc(p.PiEntries, func(e PiEntry) bool {
-						return e.Kind == kind && e.Source == s && (e.Raw == "" || e.Raw == piRawOf(raw))
-					}) {
-						out["pi"] = append(out["pi"], ProjectResource{Name: s, Path: piSettingsRel, Agent: "pi", Event: kind})
+					if s, ok := piSourceOf(raw); ok && !p.ownsPiDeclaration(kind, s, raw) {
+						out["pi"] = append(out["pi"], ProjectResource{Name: s, Path: piSettingsRel, Agent: "pi", Event: kind, Off: !piEntryOn(kind, raw)})
 					}
 				}
 			}
@@ -248,19 +312,33 @@ func (p *Project) nativeResources() map[string][]ProjectResource {
 				continue
 			}
 		}
-		out["instructions"] = append(out["instructions"], ProjectResource{Name: rel, Path: rel})
+		row := ProjectResource{Name: rel, Path: rel}
+		for _, id := range slices.Sorted(maps.Keys(projectInstrNames)) {
+			if rel == projectInstrRel(p.Dir, id, "") {
+				row.Agents = append(row.Agents, id)
+			}
+		}
+		out["instructions"] = append(out["instructions"], row)
 	}
 	for kind, rows := range out {
 		if len(rows) == 0 {
 			delete(out, kind)
 			continue
 		}
-		slices.SortFunc(rows, func(a, b ProjectResource) int {
-			return strings.Compare(a.Path+"\x00"+a.Agent+"\x00"+a.Event+"\x00"+a.Name, b.Path+"\x00"+b.Agent+"\x00"+b.Event+"\x00"+b.Name)
-		})
-		out[kind] = slices.Compact(rows)
+		slices.SortStableFunc(rows, compareProjectResources)
+		out[kind] = slices.CompactFunc(rows, func(a, b ProjectResource) bool { return compareProjectResources(a, b) == 0 })
 	}
 	return out
+}
+
+func (p *Project) ownsPiDeclaration(kind, source string, raw json.RawMessage) bool {
+	return slices.ContainsFunc(p.PiEntries, func(e PiEntry) bool {
+		return e.Kind == kind && e.Source == source && (e.Raw == "" || e.Raw == piRawOf(raw))
+	})
+}
+
+func compareProjectResources(a, b ProjectResource) int {
+	return strings.Compare(a.Path+"\x00"+a.Agent+"\x00"+a.Event+"\x00"+a.Name, b.Path+"\x00"+b.Agent+"\x00"+b.Event+"\x00"+b.Name)
 }
 
 func (p *Project) nativeInstructionPaths() []string {

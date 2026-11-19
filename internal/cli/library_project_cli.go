@@ -38,8 +38,8 @@ const libraryProjectUsage = `magpie library project [--json]      the projects (
                                      project's hooks (.claude/settings.local.json, .codex/hooks.json)
   magpie library project hook rm <dir> <hook…>   take hooks out of it
   magpie library project hook agents <dir> <hook> <a,b…|none>   the agents it has the hook for
-  magpie library project hooks <dir> [--json]   its hooks, for which agents, and the entries magpie wrote
-  magpie library project subagents <dir> [--json]   its subagents, for which agents, and the files magpie wrote
+  magpie library project hook <dir> [--json]   its hooks, for which agents, and the entries magpie wrote (also hooks)
+  magpie library project subagent <dir> [--json]   its subagents, for which agents, and the files magpie wrote (also subagents)
   magpie library project subagents add <dir> <name…> [agents=a,b…]   give it subagents: by default for the agents
                                      its subagents are for already, or, with none yet, every agent here that reads a
                                      project's subagents (.claude/agents, .codex/agents…)
@@ -155,20 +155,20 @@ func libraryProjectCmd(args []string) error {
 		if len(rest) != 1 || strings.HasPrefix(rest[0], "-") {
 			return usage()
 		}
-		return listProjects(rest[0], asJSON)
+		return listProjectResources(rest[0], "skills", asJSON)
+	case "hook":
+		if len(rest) > 0 && slices.Contains([]string{"add", "rm", "remove", "agents", "help", "-h", "--help"}, rest[0]) {
+			return libraryProjectHookCmd(rest, usage, options)
+		}
+		fallthrough
 	case "hooks":
 		asJSON := slices.Contains(rest, "--json")
 		rest = slices.DeleteFunc(slices.Clone(rest), func(a string) bool { return a == "--json" })
 		if len(rest) != 1 || strings.HasPrefix(rest[0], "-") {
 			return usage()
 		}
-		if asJSON {
-			return listProjects(rest[0], true)
-		}
-		return listProjectHooks(rest[0])
-	case "hook":
-		return libraryProjectHookCmd(rest, usage, options)
-	case "subagents":
+		return listProjectResources(rest[0], "hooks", asJSON)
+	case "subagent", "subagents":
 		return libraryProjectSubagentCmd(rest, usage, options)
 	case "server", "servers":
 		return libraryProjectServerCmd(rest, usage, options)

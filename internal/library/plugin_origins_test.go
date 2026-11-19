@@ -9,6 +9,41 @@ import (
 	"testing"
 )
 
+func TestPluginProjectOriginsMarkManagedDeclarations(t *testing.T) {
+	h := sandbox(t)
+	project := filepath.Join(h, "project")
+	write(t, filepath.Join(project, ".codex/config.toml"), "[mcp_servers.managed]\ncommand = 'true'\n[mcp_servers.native]\ncommand = 'true'\n")
+	write(t, filepath.Join(project, ".pi/settings.json"), `{"packages":["./pkg",{"source":"./pkg","skills":["skills"]}]}`)
+	l := &Library{Projects: []*Project{{
+		Dir:       project,
+		Wrote:     map[string][]string{".codex/config.toml": {"managed"}},
+		PiEntries: []PiEntry{{Kind: "package", Source: "./pkg", Raw: `"./pkg"`}},
+	}}}
+	if err := l.save(); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := ReadPluginOrigins(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pi []bool
+	codex := map[string]bool{}
+	for _, row := range rows {
+		if row.Scope != "project" || row.Discovered != nil {
+			t.Fatalf("unexpected plugin origin: %+v", row)
+		}
+		switch row.Origin {
+		case "pi-package":
+			pi = append(pi, row.Managed)
+		case "codex-mcp":
+			codex[row.Name] = row.Managed
+		}
+	}
+	if !slices.Equal(pi, []bool{true, false}) || len(codex) != 2 || !codex["managed"] || codex["native"] {
+		t.Fatalf("ownership: Pi=%v, Codex=%v", pi, codex)
+	}
+}
+
 func TestPluginOriginsSeparateBundleNativeAndProjectResources(t *testing.T) {
 	h := sandbox(t)
 	project := filepath.Join(h, "project")
