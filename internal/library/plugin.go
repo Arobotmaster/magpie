@@ -15,6 +15,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/lazyre"
 )
 
@@ -50,6 +51,12 @@ type Plugin struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	Version     string `json:"version,omitempty"`
+	// Manifests are the plugin manifests it was read from: "claude" for
+	// .claude-plugin/plugin.json, "codex" for .codex-plugin/plugin.json.
+	// A plugin that ships both has each file's hooks kept for
+	// the agent whose manifest named it, so the page has to be able to say
+	// which is which rather than presenting one flat set of parts.
+	Manifests []string `json:"manifests,omitempty"`
 	// Source is what the user gave to install it (a folder, a repository,
 	// a marketplace.json's folder), and Pick the plugin's name in it when
 	// that is a marketplace: an update fetches it again from there
@@ -113,6 +120,7 @@ type plLoaded struct {
 	hooks                      []*Hook
 	agents                     []*Subagent
 	left                       []PluginLeft
+	manifestNames              []string
 }
 
 func (p *plLoaded) parts() int {
@@ -178,12 +186,40 @@ func pluginSlug(s string) string {
 
 // isPlugin is whether dir looks like a plugin's folder.
 func isPlugin(dir string) bool {
-	for _, p := range []string{".claude-plugin/plugin.json", "skills", "agents", "commands", "hooks/hooks.json", ".mcp.json"} {
+	for _, p := range []string{".claude-plugin/plugin.json", ".codex-plugin/plugin.json", "skills", "agents", "commands", "hooks/hooks.json", ".mcp.json"} {
 		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(p))); err == nil {
 			return true
 		}
 	}
 	return false
+}
+
+// codexManifest is Codex's own plugin manifest, beside Claude Code's in a
+// plugin that ships both. Codex reads the parts it names there
+// (its binary resolves `plugin.json#hooks`), so a plugin kept for Codex alone
+// has to be read from this file: without it a `.codex-plugin` folder named
+// nothing, and its hooks file was never found.
+//
+// Its `skills` is a path like Claude's `skills` field, and its `hooks` points
+// at a JSON file shaped like hooks/hooks.json. Both are read by the code above
+// and below through the same manifest fields, so a part is carried once, never
+// twice, whichever manifest named it.
+func readCodexManifest(dir string) (map[string]any, bool) {
+	m, err := readJSONFile(filepath.Join(dir, ".codex-plugin", "plugin.json"))
+	if err != nil {
+		return nil, false
+	}
+	// `hooks` in Codex's manifest is a path to a hooks file, not inline hooks.
+	// It is read as a document here so the caller can keep Codex's hooks
+	// Codex's own; it must not also be merged into Claude's manifest fields.
+	if p, ok := m["hooks"].(string); ok && p != "" {
+		if d, inside := inside(dir, p); inside {
+			if doc, err := readJSONFile(d); err == nil {
+				m["hooks"] = doc
+			}
+		}
+	}
+	return m, true
 }
 
 // readPlugin reads the plugin in dir. over are the fields a marketplace's
@@ -194,10 +230,30 @@ func isPlugin(dir string) bool {
 // ${CLAUDE_PLUGIN_ROOT} in its parts is replaced with that folder.
 func readPlugin(dir, hint, force string, over map[string]any) (*plLoaded, error) {
 	man := map[string]any{}
+	codexManifest := false
 	if m, err := readJSONFile(filepath.Join(dir, ".claude-plugin", "plugin.json")); err == nil {
 		man = m
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
+	}
+	// A plugin that ships only Codex's manifest (or ships both, with parts
+	// named only there) is read from `.codex-plugin/plugin.json` too. Claude's
+	// fields win where both name the same one, so a part is never carried
+	// twice: the hooks below are de-duplicated by path and entry, and skills
+	// by name.
+	if cx, ok := readCodexManifest(dir); ok {
+		codexManifest = true
+		for k, v := range cx {
+			// hooks go to Codex alone and are read from this manifest below;
+			// merging them here would give Claude Code's readers Codex's
+			// commands too (the same start hooked twice, with the wrong word).
+			if k == "hooks" {
+				continue
+			}
+			if _, both := man[k]; !both {
+				man[k] = v
+			}
+		}
 	}
 	for k, v := range over {
 		if _, ok := man[k]; !ok {
@@ -205,7 +261,7 @@ func readPlugin(dir, hint, force string, over map[string]any) (*plLoaded, error)
 		}
 	}
 	if !isPlugin(dir) && len(man) == 0 {
-		return nil, fmt.Errorf("no Claude Code plugin in %s: it has no .claude-plugin/plugin.json, skills, agents, hooks or .mcp.json", dir)
+		return nil, fmt.Errorf("no plugin in %s: it has no .claude-plugin/plugin.json, .codex-plugin/plugin.json, skills, agents, hooks or .mcp.json", dir)
 	}
 	name := pluginSlug(force)
 	if name == "" {
@@ -221,6 +277,12 @@ func readPlugin(dir, hint, force string, over map[string]any) (*plLoaded, error)
 		return nil, errors.New("the plugin has no name")
 	}
 	p := &plLoaded{name: name, description: strings.Join(strings.Fields(plStr(man["description"])), " "), version: plStr(man["version"])}
+	if _, err := os.Stat(filepath.Join(dir, ".claude-plugin", "plugin.json")); err == nil {
+		p.manifestNames = append(p.manifestNames, "claude")
+	}
+	if codexManifest {
+		p.manifestNames = append(p.manifestNames, "codex")
+	}
 	root, sub := pluginDir(name), pluginSub(name)
 	leave := func(what, why string) { p.left = append(p.left, PluginLeft{What: what, Why: why}) }
 
@@ -327,6 +389,10 @@ func readPlugin(dir, hint, force string, over map[string]any) (*plLoaded, error)
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		leave("hooks/hooks.json", err.Error())
 	}
+	// A hooks file the project's Codex manifest names is Codex's own: its
+	// commands may differ from the Claude Code hooks. Mark these handlers
+	// Codex-only so the other harness doesn't run them.
+	var codexHookDocs []map[string]any
 	for _, v := range manifestList(man["hooks"]) {
 		switch x := v.(type) {
 		case string:
@@ -341,9 +407,38 @@ func readPlugin(dir, hint, force string, over map[string]any) (*plLoaded, error)
 			hookDocs = append(hookDocs, x)
 		}
 	}
+	if cx, ok := readCodexManifest(dir); ok {
+		for _, v := range manifestList(cx["hooks"]) {
+			if m, ok := v.(map[string]any); ok {
+				codexHookDocs = append(codexHookDocs, m)
+			}
+		}
+	}
+	// (when both manifests carry hooks, each file's handlers are marked for the
+	// agent whose manifest named it, below)
 	n := 0
+	// When the plugin names hooks in Codex's manifest too, each file belongs to
+	// the agent whose manifest named it. Keep their command arguments
+	// with their declared harness.
+	claudeOwner := ""
+	if len(codexHookDocs) > 0 && len(hookDocs) > 0 {
+		claudeOwner = "claude"
+	}
 	for _, doc := range hookDocs {
-		hooks, left := plHooksOf(doc, name, root, sub, &n)
+		hooks, left := plHooksOfOwned(doc, name, root, sub, &n, claudeOwner)
+		p.hooks = append(p.hooks, hooks...)
+		p.left = append(p.left, left...)
+	}
+	for _, doc := range codexHookDocs {
+		hooks, left := plHooksOfOwned(doc, name, root, sub, &n, "codex")
+		for _, h := range hooks {
+			// Codex's manifest named it, so Codex runs it and no other agent:
+			// an agent-own event is what the library has for "only this one".
+			// A Codex manifest's own `Stop`/`SessionStart` keeps its portable
+			// name in the other direction, so mark it with its Codex spelling.
+			h.Event = codexOwnEvent(h.Event)
+			h.Agents = []string{"codex"}
+		}
 		p.hooks = append(p.hooks, hooks...)
 		p.left = append(p.left, left...)
 	}
@@ -541,6 +636,14 @@ func toolKind(m string) (string, bool) {
 // is the portable one; any other is given to Claude Code alone, as
 // written.
 func plHooksOf(doc map[string]any, bundle, root string, sub func(string) string, n *int) ([]*Hook, []PluginLeft) {
+	return plHooksOfOwned(doc, bundle, root, sub, n, "")
+}
+
+// plHooksOfOwned is plHooksOf for a hooks file a particular agent's manifest
+// named: owner is that agent, and every hook it yields is that agent's own.
+// "" keeps the portable reading, where an event maps to the portable event and
+// any agent that takes it may have it.
+func plHooksOfOwned(doc map[string]any, bundle, root string, sub func(string) string, n *int, owner string) ([]*Hook, []PluginLeft) {
 	m, _ := doc["hooks"].(map[string]any)
 	if m == nil {
 		m = doc
@@ -571,6 +674,17 @@ func plHooksOf(doc map[string]any, bundle, root string, sub func(string) string,
 					continue
 				}
 				cmd := sub(quoteRoot(pluginEnvRefs(plStr(hm["command"]), bundle), root))
+				// pluginEnvRefs resolves the reads it can see in the command text.
+				// A command that RUNS A SCRIPT has another layer it cannot see:
+				// the script reads CLAUDE_PLUGIN_ROOT from its own environment
+				// even when no such reference appears in the command. Only that
+				// case gets the variables put on the command: a command whose
+				// reads are all visible is already self-contained, and adding
+				// them there would leave the variable name in a file that is
+				// meant to read as resolved.
+				if hookRunsAScript(cmd) {
+					cmd = pluginHookEnv(cmd, bundle)
+				}
 				if cmd == "" {
 					continue
 				}
@@ -581,9 +695,22 @@ func plHooksOf(doc map[string]any, bundle, root string, sub func(string) string,
 				}
 				if portable, ok := claudeEvents[ev]; ok {
 					k, tools := toolKind(matcher)
-					if slices.Contains(toolEvents, portable) && tools {
+					switch {
+					case slices.Contains(toolEvents, portable) && tools:
 						x.Event, x.Matcher = portable, k
-					} else if !slices.Contains(toolEvents, portable) && matcher == "" {
+					case portable == "session-start" && matcher != "":
+						// A session-start hook's matcher names the starts it runs
+						// at (#5604), and Claude Code's words for them are the
+						// portable ones. Reading it as empty instead sent every
+						// narrowed session hook to `claude:SessionStart`, which only
+						// Claude could take, so a plugin shipping its Codex hook
+						// beside its Claude one lost the Codex half.
+						// Keep the matcher when it parses; a matcher this can't read
+						// still falls through to the agent-own event below.
+						if _, err := startSet(matcher); err == nil {
+							x.Event, x.Matcher = portable, matcher
+						}
+					case !slices.Contains(toolEvents, portable) && matcher == "":
 						x.Event = portable
 					}
 				}
@@ -594,6 +721,12 @@ func plHooksOf(doc map[string]any, bundle, root string, sub func(string) string,
 						continue
 					}
 					x.Event, x.Matcher = "claude:"+ev, matcher
+				}
+				if owner != "" {
+					// The agent whose manifest named this file runs it, and no
+					// other: an agent-own event is how the library says that.
+					x.Event = owner + ":" + hookEventFor(x.Event, owner)
+					x.Agents = []string{owner}
 				}
 				if err := x.check(); err != nil {
 					left = append(left, PluginLeft{What: ev + " hook", Why: err.Error()})
@@ -1002,7 +1135,8 @@ func installPlugins(p *PluginProbe, input string, names, agents []string) (*Resu
 func installPlugin(l *Library, pl *plLoaded, dir, input, pick string, agents []string) ([]Problem, error) {
 	old := l.plugin(pl.name)
 	b := &Plugin{Name: pl.name, Description: pl.description, Version: pl.version, Source: input, Pick: pick,
-		Agents: orNone(slices.Compact(slices.Sorted(slices.Values(agents)))), Installed: time.Now().Format(time.RFC3339)}
+		Agents: orNone(slices.Compact(slices.Sorted(slices.Values(agents)))), Installed: time.Now().Format(time.RFC3339),
+		Manifests: pl.manifestNames}
 	if old != nil {
 		b.Agents, b.Off = old.Agents, old.Off
 		if len(agents) > 0 {
@@ -1151,6 +1285,10 @@ func (l *Library) givePlugin(b *Plugin) {
 	}
 	for _, n := range b.Hooks {
 		if h := l.hook(n); h != nil {
+			// An agent-own event ("codex:SessionStart", "claude:PreCompact") is
+			// only that agent's, whatever the plugin's agent list says: a plugin
+			// that ships a handler per agent must not run one agent's command in
+			// another's file.
 			h.Agents = orNone(slices.DeleteFunc(slices.Clone(agents), func(a string) bool { return !hookTakes(h, a) }))
 		}
 	}
@@ -1315,4 +1453,105 @@ func (l *Library) pluginsView() []PluginView {
 		out = append(out, v)
 	}
 	return out
+}
+
+// codexOwnEvent is a hook event as Codex's own: the library spells an agent's
+// own event "<agent>:<Event>", which is what keeps a hook from a Codex manifest
+// out of every other agent's files.
+func codexOwnEvent(ev string) string {
+	if strings.HasPrefix(ev, "codex:") {
+		return ev
+	}
+	// The portable events the two share keep their portable name here: a Codex
+	// manifest is Codex's, but its `Stop` is the same turn-end every agent has,
+	// and marking it codex-only would take it from Codex's own portable row.
+	for _, e := range []string{"turn-end", "after-tool", "before-tool", "prompt", "session-start"} {
+		if ev == e {
+			return "codex:" + codexEventName(e)
+		}
+	}
+	return "codex:" + ev
+}
+
+// codexEventName is the portable event's name in Codex's own spelling.
+func codexEventName(portable string) string {
+	switch portable {
+	case "turn-end":
+		return "Stop"
+	case "after-tool":
+		return "PostToolUse"
+	case "before-tool":
+		return "PreToolUse"
+	case "prompt":
+		return "UserPromptSubmit"
+	case "session-start":
+		return "SessionStart"
+	}
+	return portable
+}
+
+// claudeOwnKey is Claude Code's own spelling of an event, for the library's
+// "<agent>:<Event>" form.
+func claudeOwnKey(ev string) string {
+	if strings.HasPrefix(ev, "claude:") {
+		return ev
+	}
+	return "claude:" + ev
+}
+
+// hookEventFor is a portable event's name in an agent's own spelling, for the
+// "<agent>:<Event>" form an agent-own hook carries.
+func hookEventFor(portable, agentID string) string {
+	sp, _ := hookSpecOf(&Target{Agent: &agent.Agent{ID: agentID}})
+	if sp == nil {
+		return portable
+	}
+	if n, ok := sp.events[portable]; ok && n != "" {
+		return n
+	}
+	return portable
+}
+
+// pluginHookEnv runs a plugin's hook command with CLAUDE_PLUGIN_ROOT and
+// CLAUDE_PLUGIN_DATA set, as Claude Code runs its own plugin hooks. A hook has
+// no env field in any agent's file, so the variables ride on the command: a
+// POSIX shell prefixes them, which every agent here runs a hook's command with.
+func pluginHookEnv(cmd, bundle string) string {
+	if strings.HasPrefix(cmd, "env ") {
+		return cmd
+	}
+	return "env CLAUDE_PLUGIN_ROOT=" + shellQuote(pluginDir(bundle)) +
+		" CLAUDE_PLUGIN_DATA=" + shellQuote(pluginData(bundle)) + " " + cmd
+}
+
+// shellQuote is s as one sh word.
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	safe := true
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-._/+:", r)) {
+			safe = false
+			break
+		}
+	}
+	if safe {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// hookRunsAScript is whether a hook command hands off to a script file, whose
+// own reads of the plugin's variables the command text cannot show.
+func hookRunsAScript(cmd string) bool {
+	// The path may be quoted (`"…/session-start.sh" claude`), so look for the
+	// extension rather than for a bare word: strings.Fields would hand back
+	// `"…/session-start.sh"` with its quote still on.
+	for _, ext := range []string{".sh", ".bash", ".ps1", ".zsh"} {
+		if strings.Contains(cmd, ext) {
+			return true
+		}
+	}
+	return false
 }
