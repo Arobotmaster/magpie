@@ -9,6 +9,8 @@ import (
 )
 
 const libraryBundleUsage = `magpie library plugin [--json]      plugin sources, parts and agent status
+  magpie library plugin project=<dir> [--json]   include that project's session discovery
+  magpie library plugin observe <dir> [--claude-startup]   record session registration evidence from stdin
   magpie library plugin provenance <name> [project=<dir>] [pi-source=<spec>] [claude-startup=<jsonl>]
                                      this machine's library source, native installs and observed startup versions as JSON
   magpie library plugin probe <source>   what a folder, git address or marketplace.json holds; writes nothing
@@ -45,6 +47,12 @@ func libraryBundleCmd(rest []string, usage func() error) error {
 	if len(rest) == 0 || len(rest) == 1 && rest[0] == "list" {
 		return listBundles(false)
 	}
+	if dir, ok := strings.CutPrefix(rest[0], "project="); ok {
+		if dir == "" || len(rest) > 2 || len(rest) == 2 && rest[1] != "--json" {
+			return usage()
+		}
+		return listProjectPlugins(dir, len(rest) == 2)
+	}
 	verb, args := rest[0], rest[1:]
 	switch verb {
 	case "help", "-h", "--help":
@@ -52,6 +60,8 @@ func libraryBundleCmd(rest []string, usage func() error) error {
 		return nil
 	case "provenance":
 		return libraryPluginProvenanceCmd(args)
+	case "observe":
+		return libraryPluginObserveCmd(args)
 	case "probe", "add", "install", "rm", "remove", "on", "off", "agents", "update":
 	default:
 		return fmt.Errorf("no library plugin command %q\n  %s", verb, libraryBundleUsage)

@@ -21,9 +21,10 @@ type PluginStatus struct {
 }
 
 type PluginPartState struct {
-	Kind  string `json:"kind"`
-	Name  string `json:"name"`
-	Agent string `json:"agent,omitempty"`
+	Kind         string `json:"kind"`
+	Name         string `json:"name"`
+	Agent        string `json:"agent,omitempty"`
+	DiscoveryKey string `json:"discoveryKey,omitempty"`
 	PluginStatus
 }
 
@@ -31,19 +32,35 @@ type PluginPartState struct {
 // bundle, a native install and an independently configured MCP server or
 // Pi package can coexist without sharing ownership or loaded state.
 type PluginOrigin struct {
-	Name    string            `json:"name"`
-	Origin  string            `json:"origin"`
-	Agent   string            `json:"agent,omitempty"`
-	Scope   string            `json:"scope"`
-	Source  string            `json:"source,omitempty"`
-	Version string            `json:"version,omitempty"`
-	Parts   []PluginPartState `json:"parts,omitempty"`
+	Name         string            `json:"name"`
+	Origin       string            `json:"origin"`
+	Agent        string            `json:"agent,omitempty"`
+	Scope        string            `json:"scope"`
+	Source       string            `json:"source,omitempty"`
+	Version      string            `json:"version,omitempty"`
+	DiscoveryKey string            `json:"discoveryKey,omitempty"`
+	Parts        []PluginPartState `json:"parts,omitempty"`
 	PluginStatus
 }
 
 // ReadPluginOrigins inspects declarations and native records. It neither
 // syncs the library nor starts tools to compensate for missing evidence.
 func ReadPluginOrigins(dir string) ([]PluginOrigin, error) {
+	if dir == "" {
+		return readPluginOriginRows("")
+	}
+	project, err := pluginDiscoveryProject(dir)
+	if err != nil {
+		return readPluginOriginRows(dir)
+	}
+	rows, err := readPluginOriginRows(project)
+	if err == nil {
+		applyPluginDiscovery(project, rows)
+	}
+	return rows, err
+}
+
+func readPluginOriginRows(dir string) ([]PluginOrigin, error) {
 	if dir != "" {
 		var err error
 		if dir, err = ProjectPath(dir); err != nil {
@@ -73,7 +90,10 @@ func ReadPluginOrigins(dir string) ([]PluginOrigin, error) {
 	}
 	rows := l.bundleOrigins(project)
 	rows = append(rows, claudePluginOrigins(project)...)
-	rows = append(rows, codexMCPOrigins(project)...)
+	rows = append(rows, codexMCPOrigins(nil)...)
+	if project != nil {
+		rows = append(rows, codexMCPOrigins(project)...)
+	}
 	rows = append(rows, piPluginOrigins(project)...)
 	return rows, nil
 }

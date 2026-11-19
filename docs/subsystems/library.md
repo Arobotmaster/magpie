@@ -215,3 +215,36 @@ project declarations, Codex MCP servers and Pi packages by source. An
 enable flag and an installation record describe separate facts. A session
 discovery value stays unknown unless there is evidence from a session
 that identifies the source.
+
+Use `magpie library project plugin <dir> --json` or
+`magpie library plugin project=<dir> --json` to get the `discoveryKey`
+for each registration that can be attributed to a source. Submit a curated
+runtime inventory for one session with `magpie library plugin observe <dir>`.
+It reads one JSON object on stdin, for example
+`{"cwd":"/absolute/project","tool":"claude","seen":["<native MCP key>"],"complete":["hook"],"missing":["<library hook key>"]}`.
+Use the session's working directory and one of `claude`, `codex` or `pi`.
+The tool and exact source must match each key. Include a key in `seen`
+only when the session exposes that registration and its source. A key in
+`missing` also requires a complete runtime enumeration of its kind in
+`complete` (`plugin`, `hook`, `skill`, `subagent`, `mcp` or `package`).
+Leave ambiguous or unexamined registrations out. An MCP configuration
+entry or an installed package by itself provides no session observation.
+For example, Pi's RPC `get_commands` includes `sourceInfo` for extension
+commands. A command with package source and scope identifies a positive
+for that package. An absence requires coverage of packages without
+registered commands as well.
+
+For a Claude Code startup, pass its local `system/init` JSON line on
+stdin to `magpie library plugin observe <dir> --claude-startup`. The same
+parser as `plugin provenance` reads its working directory and loaded plugin
+IDs and versions. It records a positive only for an exact match to one
+native install and leaves individual parts, ambiguous installs and missing
+plugins unknown. Supply source-attributed part evidence through the
+curated inventory when available.
+
+MagPie stores only keys and results in its local configuration. An
+observation replaces the previous snapshot for that project and tool.
+The listings and project card show that snapshot alongside installation
+and enablement. Listings without a project have no session scope. They
+and the project card read the existing data without starting an agent.
+See [plugin discovery](../../internal/library/plugin_discovery.go).

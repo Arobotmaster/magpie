@@ -2,10 +2,23 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/yetone/magpie/internal/library"
 )
+
+func libraryPluginObserveCmd(args []string) error {
+	if len(args) < 1 || len(args) > 2 || strings.HasPrefix(args[0], "-") ||
+		len(args) == 2 && args[1] != "--claude-startup" {
+		return fmt.Errorf("usage: magpie library plugin observe <dir> [--claude-startup]")
+	}
+	if err := library.RecordPluginDiscovery(args[0], os.Stdin, len(args) == 2); err != nil {
+		return err
+	}
+	fmt.Println("Recorded plugin discovery for this session.")
+	return nil
+}
 
 func printPluginOrigins(rows []library.PluginOrigin) {
 	origins := map[string]string{

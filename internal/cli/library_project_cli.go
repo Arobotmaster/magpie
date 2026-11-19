@@ -51,7 +51,7 @@ const libraryProjectUsage = `magpie library project [--json]      the projects (
                                      (.mcp.json, .codex/config.toml, .pi/mcp.json…)
   magpie library project server rm <dir> <name…>   take servers out of it
   magpie library project server agents <dir> <name> <a,b…|none>   the agents it has the server for
-  magpie library project plugin <dir> [--json]  the Claude Code plugins it turns on or off itself
+  magpie library project plugin <dir> [--json]  plugin sources, parts and session discovery in the project
   magpie library project plugin on|off <dir> <id>   turn one on or off in the project's own
                                      .claude/settings.local.json (the plugin is installed by Claude Code)
   magpie library project pi <dir> [--json]      its Pi packages and extensions, and what magpie wrote there
