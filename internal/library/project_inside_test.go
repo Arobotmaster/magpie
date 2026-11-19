@@ -51,14 +51,18 @@ func TestProjectInstructionsStayInTheProject(t *testing.T) {
 	gone(t, nothing)
 }
 
-// A link inside the project (AGENTS.md to CLAUDE.md) still takes them.
-func TestProjectInstructionsThroughALinkInside(t *testing.T) {
+// Changing the file behind a link would transfer ownership to the
+// link's target. Preserve both the link and the existing file.
+func TestProjectInstructionsProtectLinkInside(t *testing.T) {
 	_, dir := instrProject(t)
-	write(t, filepath.Join(dir, "docs", "CLAUDE.md"), "Mine.\n")
-	symlinkAt(t, filepath.Join("docs", "CLAUDE.md"), filepath.Join(dir, "CLAUDE.md"))
-	setInstr(t, dir, "Here.", "claude")
-	if got := read(t, filepath.Join(dir, "docs", "CLAUDE.md")); !strings.Contains(got, block("Here.")) {
-		t.Errorf("docs/CLAUDE.md = %q", got)
+	target := filepath.Join(dir, "docs", "CLAUDE.md")
+	write(t, target, "Mine.\n")
+	link := filepath.Join(dir, "CLAUDE.md")
+	symlinkAt(t, filepath.Join("docs", "CLAUDE.md"), link)
+	text, agents := "Here.", []string{"claude"}
+	r, err := ProjectInstructions(dir, ProjectInstr{Text: &text, Agents: &agents})
+	if err != nil || !problemAbout(r, "project:instructions") || !isLink(t, link) || read(t, target) != "Mine.\n" {
+		t.Fatalf("instructions symlink: %+v %v", r, err)
 	}
 }
 

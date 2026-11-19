@@ -91,6 +91,10 @@ type Server struct {
 	// Discord: with many of them, which is which). Only the library keeps
 	// it, and a sync carries it; no agent is given it (TestNoteNeverGiven).
 	Note string `json:"note,omitempty"`
+	// Scope specifies where a project MCP server is written. The default
+	// includes the repository's other worktrees. ScopeProject writes only
+	// to the named folder and keeps the server out of the shared router.
+	Scope string `json:"scope,omitempty"`
 	// Shared is set when this computer starts the server its own way
 	// (#3836, #6426; jinpwng on X: one server on a Mac and in WSL, each
 	// with its own path): Command, Args and Env are then this computer's,
@@ -196,6 +200,13 @@ func (s *Server) check() error {
 	}
 	if err := checkNote(&s.Note); err != nil {
 		return fmt.Errorf("%s: %w", s.Name, err)
+	}
+	switch s.Scope {
+	case "", "anywhere":
+		s.Scope = ""
+	case ScopeProject:
+	default:
+		return fmt.Errorf("%s: unknown scope %q: anywhere or project", s.Name, s.Scope)
 	}
 	if s.StartupTimeout < 0 || s.StartupTimeout > maxStartupTimeout {
 		return fmt.Errorf("%s: the startup timeout is between 0 (the agent's own) and %d seconds", s.Name, maxStartupTimeout)

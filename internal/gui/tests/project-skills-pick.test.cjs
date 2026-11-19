@@ -32,7 +32,11 @@ function server(lang, posts) {
       agent("goose", "Goose"),
     ],
     instructions: { agents: [] }, servers: [], skills: [sk("pdf"), sk("docx"), sk("xlsx")], foundServers: [], foundSkills: [],
-    projects: Object.entries(projects).map(([dir, skills]) => ({ dir, name: path.basename(dir), copy: false, skills: { ...skills }, placed: [], servers: {}, wrote: {} })),
+    projects: Object.entries(projects).map(([dir, skills]) => ({
+      dir, name: path.basename(dir), copy: false, skills: { ...skills }, placed: [], servers: {}, wrote: {},
+      native: dir === APP ? { skills: [{ name: "native-skill", path: ".agents/skills/native-skill" }] } : {},
+      skillLinks: dir === APP ? { ".claude/skills/native-skill": "../../.agents/skills/native-skill" } : {},
+    })),
   });
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
@@ -40,6 +44,18 @@ function server(lang, posts) {
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return route.fulfill({ json: { agents: [], profiles: [], settings: { lang, theme: "light" } } });
     if (url.pathname === "/api/library") return route.fulfill({ json: lib() });
+    if (url.pathname === "/api/library/projects/plugin-origins") {
+      assert.equal(req.method(), "GET");
+      if (url.searchParams.get("dir") !== APP) return route.fulfill({ json: [] });
+      return route.fulfill({ json: [
+        { name: "example-kit", origin: "library", scope: "library", installed: true, enabled: true,
+          parts: [{ kind: "hook", name: "example-kit-notify" }] },
+        { name: "example-kit@market", origin: "claude-native", agent: "claude", scope: "local", installed: true, enabled: false,
+          parts: [{ kind: "mcp", name: "lookup", agent: "claude" }] },
+        { name: "project-search", origin: "codex-mcp", agent: "codex", scope: "project", enabled: true },
+        { name: "npm:@example/pi-tools", origin: "pi-package", agent: "pi", scope: "project", installed: true, enabled: true },
+      ] });
+    }
     if (url.pathname === "/api/library/projects/skills") {
       const b = req.postDataJSON();
       posts.push(b);
@@ -66,6 +82,76 @@ const words = {
 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(engine + ": plugin sources distinguish bundle, native install and independent resources", async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const labels = {
+      en: ["MagPie library", "Claude Code native", "Independent Codex MCP", "Pi native package", "Session discovery Unknown"],
+      zh: ["MagPie 资源库", "Claude Code 原生安装", "Codex 独立 MCP", "Pi 原生包", "会话发现 未知"],
+      "zh-TW": ["MagPie 資源庫", "Claude Code 原生安裝", "Codex 獨立 MCP", "Pi 原生套件", "工作階段探索 未知"],
+      ja: ["MagPie ライブラリ", "Claude Code ネイティブ", "Codex 独立 MCP", "Pi ネイティブパッケージ", "セッションで検出 不明"],
+      de: ["MagPie-Bibliothek", "Claude Code nativ", "Eigenständiges Codex-MCP", "Natives Pi-Paket", "In Sitzung erkannt Unbekannt"],
+    };
+    for (const [lang, words] of Object.entries(labels)) {
+      await t.test(lang, async () => {
+        const page = await browser.newPage();
+        t.after(() => page.close());
+        await page.addInitScript(() => localStorage.setItem("magpie.libTab", "plugins"));
+        const posts = [];
+        await page.route("**/*", server(lang, posts));
+        await page.goto("http://magpie.test/");
+        await page.locator('button[data-view="library"]').click();
+        const app = page.locator("#view-library .lib-project").filter({ hasText: "~/code/app" });
+        await app.locator(".lib-projhead").click();
+        const details = app.locator("details.lib-plugin-origin");
+        await details.last().waitFor();
+        assert.equal(await details.count(), 4);
+        for (const [i, word] of words.slice(0, 4).entries()) {
+          const summary = details.nth(i).locator("summary");
+          const text = await summary.innerText();
+          assert.ok(text.includes(word));
+          assert.ok(text.includes(words[4]));
+        }
+        await details.first().locator("summary").click();
+        assert.match(await details.first().getByRole("listitem").innerText(), /example-kit-notify/);
+        assert.doesNotMatch(await details.first().getByRole("listitem").innerText(), /lookup/);
+        assert.deepEqual(posts, []);
+      });
+    }
+  });
+
+  test(engine + ": project-provided skills and MagPie links have read-only rows", async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const labels = {
+      en: "Project-provided",
+      zh: "项目自带",
+      "zh-TW": "專案自帶",
+      ja: "プロジェクト付属",
+      de: "Vom Projekt bereitgestellt",
+    };
+    for (const [lang, label] of Object.entries(labels)) {
+      await t.test(lang, async () => {
+        const page = await browser.newPage();
+        t.after(() => page.close());
+        await page.addInitScript(() => localStorage.setItem("magpie.libTab", "skills"));
+        const posts = [];
+        await page.route("**/*", server(lang, posts));
+        await page.goto("http://magpie.test/");
+        await page.locator('button[data-view="library"]').click();
+        const app = page.locator("#view-library .lib-project").filter({ hasText: "~/code/app" });
+        await app.locator(".lib-projhead").click();
+        const list = app.getByRole("list");
+        const rows = list.getByRole("listitem");
+        assert.match(await rows.first().innerText(), new RegExp(label));
+        assert.match(await rows.last().innerText(), /\.claude\/skills\/native-skill/);
+        assert.equal(await rows.count(), 2);
+        assert.equal(await list.getByRole("button").count(), 0);
+        assert.deepEqual(posts, []);
+      });
+    }
+  });
+
   test(engine + ": a project's skills, picked from its menu", async (t) => {
     assert(["chromium", "webkit"].includes(engine), "BROWSER must be chromium or webkit");
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));

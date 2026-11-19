@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -39,10 +40,34 @@ func projectLib(t *testing.T) (h, proj string) {
 	return h, proj
 }
 
-// gitInit makes dir a repository's top folder, as git init does.
+var projectTestGit, _ = exec.LookPath("git")
+
+func projectGitCommand(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	if projectTestGit == "" {
+		t.Skip("git is required for the project fixture")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Setenv("PATH", os.Getenv("PATH")+string(os.PathListSeparator)+filepath.Dir(projectTestGit))
+	}
+	cmd := exec.Command(projectTestGit, append([]string{"-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=" + t.TempDir(), "-C", dir}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+}
+
 func gitInit(t *testing.T, dir string) {
 	t.Helper()
-	write(t, filepath.Join(dir, ".git", "HEAD"), "ref: refs/heads/main\n")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectGitCommand(t, dir, "init", "-q", "--template=", "-b", "main")
+}
+
+func projectWorktree(t *testing.T, dir, wt string) {
+	t.Helper()
+	projectGitCommand(t, dir, "commit", "--allow-empty", "-qm", "fixture")
+	projectGitCommand(t, dir, "worktree", "add", "--detach", "-q", wt)
 }
 
 // excluded is magpie's block in the repository's info/exclude for proj,
@@ -172,20 +197,13 @@ func TestProjectOutsideGit(t *testing.T) {
 	if g := read(t, filepath.Join(proj, ".gitignore")); g != "node_modules/\n" {
 		t.Errorf(".gitignore: %q", g)
 	}
-	l, _ := load()
-	if l.treesChanged() {
-		t.Error("a folder outside git is synced again every round")
-	}
 	gitInit(t, proj)
-	if l, _ = load(); !l.treesChanged() {
-		t.Fatal("a folder made a repository isn't synced again")
-	}
-	keepProjectTrees()
+	ok(t)(ProjectApply(proj))
 	if g := excluded(t, proj); !strings.Contains(g, "/.claude/skills/docx\n") {
 		t.Errorf("info/exclude: %q", g)
 	}
-	if l, _ = load(); l.treesChanged() {
-		t.Error("synced again with nothing changed")
+	if plan := ok(t)(ProjectPlan(proj)); len(plan.Writes) != 0 {
+		t.Fatalf("repeated apply would write: %+v", plan.Writes)
 	}
 }
 
@@ -229,7 +247,7 @@ func TestProjectSkillScanErrorPreservesCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(r.Problems) != 1 || r.Problems[0].Agent != proj || !strings.Contains(r.Problems[0].Error, blocked) {
+	if len(r.Problems) != 1 || r.Problems[0].Agent != proj || !strings.Contains(r.Problems[0].Error, realBelow(blocked)) {
 		t.Fatalf("unreadable project copy wasn't reported: %+v", r.Problems)
 	}
 	if err := os.Chmod(blocked, 0o755); err != nil {
@@ -247,8 +265,8 @@ func TestProjectRefusesForeignFolder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(r.Problems) != 1 || r.Problems[0].Agent != proj || !strings.Contains(r.Problems[0].Error, "isn't magpie's") {
-		t.Fatalf("problems: %+v", r.Problems)
+	if len(r.Problems) != 0 || len(r.Skipped) != 1 || r.Skipped[0].Agent != proj || !strings.Contains(r.Skipped[0].Error, "project already has") {
+		t.Fatalf("wanted a skip: %+v", r)
 	}
 	if !strings.Contains(read(t, filepath.Join(proj, ".claude/skills/pdf/SKILL.md")), "The project's own") {
 		t.Error("the project's own was overwritten")
@@ -284,6 +302,7 @@ func TestRemoveSkillLeavesProjects(t *testing.T) {
 	_, proj := projectLib(t)
 	ok(t)(ProjectSkill(proj, "pdf", []string{"claude"}))
 	ok(t)(RemoveSkill("pdf"))
+	ok(t)(ProjectApply(proj))
 	gone(t, filepath.Join(proj, ".claude/skills/pdf"))
 	if v, _ := Read(nil); len(v.Projects[0].Skills) != 0 {
 		t.Errorf("skills: %+v", v.Projects[0].Skills)
@@ -318,6 +337,7 @@ func TestUpdateSkillRefreshesProjects(t *testing.T) {
 	version = "two"
 	ok(t)(UpdateSkill("pdf", false))
 	ok(t)(UpdateSomeSkills([]string{"docx"}))
+	ok(t)(Sync())
 	for _, p := range []string{linked, copied} {
 		for _, e := range []string{".claude/skills/pdf", ".agents/skills/docx"} {
 			if s := read(t, filepath.Join(p, e, "SKILL.md")); !strings.Contains(s, " two") {
@@ -330,6 +350,7 @@ func TestUpdateSkillRefreshesProjects(t *testing.T) {
 	}
 	version = "three"
 	ok(t)(UpdateSkills())
+	ok(t)(ProjectApply(copied))
 	if s := read(t, filepath.Join(copied, ".agents/skills/docx/SKILL.md")); !strings.Contains(s, "three") {
 		t.Errorf("copy after update all: %q", s)
 	}

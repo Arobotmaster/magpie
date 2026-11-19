@@ -31,9 +31,9 @@ function server(lang, posts) {
       agent("codex", "Codex", { projectSkills: ".agents/skills", projectMCP: ".codex/config.toml", projectOff: true }),
       agent("gemini", "Gemini CLI", { projectSkills: ".agents/skills", projectMCP: ".gemini/settings.json" }),
     ],
-    instructions: { agents: [] }, servers: [sv("search", ["claude", "codex", "gemini"]), sv("erp", [])],
+    instructions: { agents: [] }, servers: [sv("search", ["claude", "codex", "gemini"]), { ...sv("erp", []), scope: "project" }],
     skills: [sk("novel", ["claude"], { router: "direct" }), sk("pdf", ["claude"])], foundServers: [], foundSkills: [],
-    projects: [{ dir: DIR, name: "design", copy: false, skills: { ...st.skills }, placed: [], servers: { ...st.servers }, serversOff: { ...st.serversOff }, skillsOff: { ...st.skillsOff }, wrote: {} }],
+    projects: [{ dir: DIR, name: "design", copy: false, skills: { ...st.skills }, placed: [], servers: { ...st.servers }, scoped: st.servers.erp?.length ? ["erp"] : [], serversOff: { ...st.serversOff }, skillsOff: { ...st.skillsOff }, wrote: {} }],
   });
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
@@ -121,6 +121,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(await lit(row("search")), ["claude", "gemini"]);
         await chip(page, row("erp").locator('.lib-ag[data-agent="claude"]'));
         await said(page, w.erp);
+        const scopeNote = lang === "zh"
+          ? "只有当前项目目录会获得 erp。其他 worktree 仍会获得其余项目配置。MCP 路由不会提供这些服务器。"
+          : "Only this project's folder gets erp. Other worktrees get the rest of the project's set. The MCP router doesn't serve these servers.";
+        await card.getByText(scopeNote, { exact: true }).waitFor();
         assert.deepEqual(posts, [
           { path: "projects/server-off", dir: DIR, name: "search", agents: ["claude"] },
           { path: "projects/server-off", dir: DIR, name: "search", agents: ["claude", "codex"] },

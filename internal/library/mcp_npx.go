@@ -290,7 +290,7 @@ func testsLeaveTheMachine() {
 func init() {
 	testsLeaveTheMachine()
 	npxSynced = func() {
-		if _, err := Sync(); err != nil {
+		if _, err := SyncAgents(); err != nil {
 			log.Printf("library: syncing after an MCP package install: %v", err)
 		}
 	}

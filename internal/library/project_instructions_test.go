@@ -33,7 +33,8 @@ func block(text string) string { return blockBegin + "\n" + text + "\n" + blockE
 func TestProjectInstructionsEachAgentsFile(t *testing.T) {
 	h, dir := instrProject(t)
 	mine := "# Mine\n\nRun make test.\n"
-	write(t, filepath.Join(dir, "CLAUDE.md"), mine)
+	setInstr(t, dir, "Initially managed.", "claude")
+	write(t, filepath.Join(dir, "CLAUDE.md"), mine+"\n"+block("Initially managed.")+"\n")
 	setInstr(t, dir, "Use pnpm here.", "claude", "codex", "gemini", "cursor")
 	if got, want := read(t, filepath.Join(dir, "CLAUDE.md")), "# Mine\n\nRun make test.\n\n"+block("Use pnpm here.")+"\n"; got != want {
 		t.Errorf("CLAUDE.md = %q, want %q", got, want)
@@ -98,22 +99,18 @@ func instrView(t *testing.T) *View {
 	return v
 }
 
-// magpie's part edited in the file is the user's until the project's text
-// changes; a part, or a file, the user took out is written again; text
-// the user added to a file magpie made keeps the file when turned off.
+// An edited managed block is protected. An untracked file removed by
+// hand can be generated again. Surrounding user text survives removal.
 func TestProjectInstructionsLeaveTheUsersEdits(t *testing.T) {
 	_, dir := instrProject(t)
 	setInstr(t, dir, "One.", "codex")
 	f := filepath.Join(dir, "AGENTS.md")
 	edited := "# Theirs\n\n" + block("One, edited.") + "\n"
 	write(t, f, edited)
-	ok(t)(Sync())
-	if got := read(t, f); got != edited {
-		t.Errorf("an edited part was written over: %q", got)
-	}
-	setInstr(t, dir, "Two.")
-	if got, want := read(t, f), "# Theirs\n\n"+block("Two.")+"\n"; got != want {
-		t.Errorf("AGENTS.md = %q, want %q", got, want)
+	text := "Two."
+	res, err := ProjectInstructions(dir, ProjectInstr{Text: &text})
+	if err != nil || !problemAbout(res, "project:instructions") || read(t, f) != edited {
+		t.Fatalf("edited instructions: %+v %v", res, err)
 	}
 	if err := os.Remove(f); err != nil {
 		t.Fatal(err)
@@ -138,11 +135,15 @@ func TestProjectInstructionsTheFileTheAgentReads(t *testing.T) {
 	write(t, filepath.Join(dir, "AGENTS.override.md"), "Override.\n")
 	write(t, filepath.Join(dir, ".claude", "CLAUDE.md"), "Hidden.\n")
 	write(t, filepath.Join(h, ".gemini", "settings.json"), `{"context": {"fileName": ["CONTEXT.md", "GEMINI.md"]}}`)
-	setInstr(t, dir, "Here.", "codex", "claude", "gemini")
-	if got := read(t, filepath.Join(dir, "AGENTS.override.md")); got != "Override.\n\n"+block("Here.")+"\n" {
+	text, agents := "Here.", []string{"codex", "claude", "gemini"}
+	res, err := ProjectInstructions(dir, ProjectInstr{Text: &text, Agents: &agents})
+	if err != nil || len(res.Problems) != 2 {
+		t.Fatalf("existing instruction files: %+v %v", res, err)
+	}
+	if got := read(t, filepath.Join(dir, "AGENTS.override.md")); got != "Override.\n" {
 		t.Errorf("AGENTS.override.md = %q", got)
 	}
-	if got := read(t, filepath.Join(dir, ".claude", "CLAUDE.md")); got != "Hidden.\n\n"+block("Here.")+"\n" {
+	if got := read(t, filepath.Join(dir, ".claude", "CLAUDE.md")); got != "Hidden.\n" {
 		t.Errorf(".claude/CLAUDE.md = %q", got)
 	}
 	if got := read(t, filepath.Join(dir, "CONTEXT.md")); got != block("Here.")+"\n" {
@@ -157,7 +158,8 @@ func TestProjectInstructionsTheFileTheAgentReads(t *testing.T) {
 func TestProjectInstructionsKeepCRLF(t *testing.T) {
 	_, dir := instrProject(t)
 	f := filepath.Join(dir, "AGENTS.md")
-	write(t, f, "Mine.\r\nMore.\r\n")
+	setInstr(t, dir, "First.", "codex")
+	write(t, f, "Mine.\r\nMore.\r\n\r\n"+strings.ReplaceAll(block("First."), "\n", "\r\n")+"\r\n")
 	setInstr(t, dir, "Here.", "codex")
 	if got, want := read(t, f), "Mine.\r\nMore.\r\n\r\n"+strings.ReplaceAll(block("Here."), "\n", "\r\n")+"\r\n"; got != want {
 		t.Errorf("AGENTS.md = %q, want %q", got, want)
@@ -222,21 +224,14 @@ func TestProjectInstructionsFollowWorktrees(t *testing.T) {
 	_, dir := instrProject(t)
 	setInstr(t, dir, "Here.", "claude")
 
-	// git worktree add ../app-wt
 	wt := filepath.Join(filepath.Dir(dir), "app-wt")
-	own := filepath.Join(dir, ".git", "worktrees", "app-wt")
-	write(t, filepath.Join(wt, ".git"), "gitdir: "+own+"\n")
-	write(t, filepath.Join(own, "gitdir"), filepath.Join(wt, ".git")+"\n")
-	write(t, filepath.Join(own, "commondir"), "../..\n")
-	write(t, filepath.Join(wt, "CLAUDE.md"), "The branch's own.\n")
-	keepProjectTrees()
+	projectWorktree(t, dir, wt)
+	ok(t)(ProjectDistribute(dir, ProjectDistribution{Instructions: true}))
 	f := filepath.Join(wt, "CLAUDE.md")
-	if got := read(t, f); got != "The branch's own.\n\n"+block("Here.")+"\n" {
+	if got := read(t, f); got != block("Here.")+"\n" {
 		t.Fatalf("the worktree's CLAUDE.md = %q", got)
 	}
 
 	ok(t)(ProjectInstructions(dir, ProjectInstr{Agents: &[]string{}}))
-	if got := read(t, f); got != "The branch's own.\n" {
-		t.Errorf("the worktree's CLAUDE.md after off = %q", got)
-	}
+	gone(t, f)
 }

@@ -219,45 +219,22 @@ func TestProjectWorktreeFollows(t *testing.T) {
 	ok(t)(ProjectSkill(proj, "pdf", []string{"claude"}))
 	ok(t)(ProjectServer(proj, "erp", []string{"cursor"}))
 
-	// git worktree add ../shop-wt
 	wt := filepath.Join(filepath.Dir(proj), "shop-wt")
-	own := filepath.Join(proj, ".git", "worktrees", "shop-wt")
-	write(t, filepath.Join(wt, ".git"), "gitdir: "+own+"\n")
-	write(t, filepath.Join(own, "gitdir"), filepath.Join(wt, ".git")+"\n")
-	write(t, filepath.Join(own, "commondir"), "../..\n")
-	l, _ := load()
-	if !l.treesChanged() {
-		t.Fatal("a new worktree isn't noticed")
+	projectWorktree(t, proj, wt)
+	ok(t)(ProjectApply(proj))
+	gone(t, filepath.Join(wt, ".claude", "skills", "pdf"))
+	ok(t)(ProjectDistribute(proj, ProjectDistribution{Skills: true}))
+	if !isLink(t, filepath.Join(wt, ".claude", "skills", "pdf")) {
+		t.Error("the worktree hasn't the project's opted-in skill")
 	}
-	keepProjectTrees()
-	if p := filepath.Join(wt, ".claude", "skills", "pdf"); !isLink(t, p) {
-		t.Errorf("the worktree hasn't the project's skill")
-	}
-	if s := servers(t, filepath.Join(wt, ".cursor", "mcp.json"), "mcpServers"); s["erp"] == nil {
-		t.Errorf("the worktree hasn't the project's server: %v", s)
-	}
-	if g := excluded(t, proj); strings.Count(g, "/.claude/skills/pdf\n") != 1 || !strings.Contains(g, "/.cursor/mcp.json\n") {
+	gone(t, filepath.Join(wt, ".cursor", "mcp.json"))
+	if g := excluded(t, proj); strings.Count(g, "/.claude/skills/pdf\n") != 1 {
 		t.Errorf("info/exclude:\n%s", g)
 	}
-	v, _ := Read(nil)
-	if !slices.Equal(v.Projects[0].Trees, []string{wt}) {
-		t.Errorf("trees: %v", v.Projects[0].Trees)
-	}
-	if l, _ = load(); l.treesChanged() {
-		t.Error("synced again with nothing changed")
-	}
-
-	// a change to the project reaches the worktree
 	ok(t)(ProjectSkill(proj, "pdf", nil))
 	gone(t, filepath.Join(wt, ".claude", "skills", "pdf"))
-
-	// git worktree remove: magpie lets it go
-	os.RemoveAll(wt)
-	os.RemoveAll(own)
-	if l, _ = load(); !l.treesChanged() {
-		t.Fatal("a worktree removed isn't noticed")
-	}
-	keepProjectTrees()
+	projectGitCommand(t, proj, "worktree", "remove", wt)
+	ok(t)(ProjectApply(proj))
 	if v, _ := Read(nil); len(v.Projects[0].Trees) != 0 {
 		t.Errorf("trees after: %v", v.Projects[0].Trees)
 	}

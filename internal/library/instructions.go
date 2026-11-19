@@ -533,7 +533,7 @@ func ReadInstructions() (*InstructionsView, error) {
 	if err != nil {
 		return nil, err
 	}
-	return l.instructionsView(targetsAsleep(false)), nil
+	return l.instructionsView(targetsAsleep(false, false)), nil
 }
 
 // instructionsView is the Instructions page for these agents, and those in
@@ -904,7 +904,6 @@ func KeepLinked(ctx context.Context, interval time.Duration) {
 		// an edit made in a subagent's own file (subagent_file.go)
 		keepSubagentFiles()
 		// a git worktree made or removed beside a project follows it
-		keepProjectTrees()
 		// Claude Code's auto-compaction beside a bili plugin magpie
 		// installed before it kept it on
 		keepBiliCompact()

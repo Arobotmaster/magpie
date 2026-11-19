@@ -121,6 +121,9 @@ func Filtered(f func(path string, data []byte) []byte, fn func() error) error {
 	return fn()
 }
 
+// HasHardLinks reports whether writing this file in place affects other paths.
+func HasHardLinks(path string) bool { return hardLinked(path) }
+
 // WriteAtomic writes data to path via a temp file + rename so a crash can
 // never leave a half-written config behind. File mode and group are
 // preserved. When path is a symlink (a config kept in a dotfiles repo) the

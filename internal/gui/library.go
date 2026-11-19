@@ -70,16 +70,20 @@ func libraryView(res *library.Result) (libraryJSON, error) { return libraryRead(
 // reading the agents' skill folders through (library.Glance), for the
 // page to show at once while the rest is read (#541).
 func libraryRead(res *library.Result, glance bool) (libraryJSON, error) {
+	read := library.Read
+	if glance {
+		read = library.Glance
+	}
+	return libraryReadWith(res, read)
+}
+
+func libraryReadWith(res *library.Result, read func([]library.Problem) (*library.View, error)) (libraryJSON, error) {
 	lastProblems.Lock()
 	if res != nil {
 		lastProblems.p = res.Problems
 	}
 	p := lastProblems.p
 	lastProblems.Unlock()
-	read := library.Read
-	if glance {
-		read = library.Glance
-	}
 	v, err := read(p)
 	home, _ := os.UserHomeDir()
 	return libraryJSON{View: v, Result: res, Home: home, Problems: p,
@@ -196,6 +200,14 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			return
 		}
 		writeJSON(rw, v)
+	})
+	mux.HandleFunc("GET /api/library/projects/plugin-origins", func(rw http.ResponseWriter, r *http.Request) {
+		rows, err := library.ReadPluginOrigins(r.URL.Query().Get("dir"))
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, rows)
 	})
 	mux.HandleFunc("GET /api/library/skill", func(rw http.ResponseWriter, r *http.Request) {
 		f, err := library.ReadSkillFile(r.URL.Query().Get("name"), r.URL.Query().Get("file"))
@@ -722,20 +734,32 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			Hook        library.Hook   // a hook saved (#1790)
 			Env         library.EnvVar // a variable saved
 			// a subagent saved (#2283)
-			Subagent library.Subagent
-			Command  library.Command
-			Rule     library.Rule
-			Agent    string            // the agent whose own skill is in the library's way
-			App      string            // the app the MCP hub is added to (servers/hub-open)
-			Note     string            // what the MCP router says of itself (servers/hub-note), or a skill's note (skills/note)
-			ID       string            // a market server's, or a market skill's in its repository
-			Values   map[string]string // what a market server needs
-			Dir      string            // a project's folder
-			Instr    *string           `json:"instr"` // a project's own instructions (projects/instructions)
-			Copy     bool              // a project gets copies, not links
-			Keep     bool              // a project removed keeps what magpie put in it
-			On       bool              // every skill or server given to the agents, or taken from them
-			How      string            // link or copy: how skills are given to Agent, or to every agent with none (#896)
+			Subagent     library.Subagent
+			Command      library.Command
+			Rule         library.Rule
+			Agent        string            // the agent whose own skill is in the library's way
+			App          string            // the app the MCP hub is added to (servers/hub-open)
+			Note         string            // what the MCP router says of itself (servers/hub-note), or a skill's note (skills/note)
+			ID           string            // a market server's, or a market skill's in its repository
+			Values       map[string]string // what a market server needs
+			Dir          string            // a project's folder
+			Preview      bool
+			PlanID       string
+			Distribution library.ProjectDistribution
+			Instr        *string `json:"instr"` // a project's own instructions (projects/instructions)
+			Kind         string  // "package" or "extension": a project's Pi entry (projects/pi)
+			// Mode for projects/pi: "off" keeps an entry and stops loading it;
+			// "" with On false is a removal
+			Mode string
+			Copy bool // a project gets copies, not links
+			Keep bool // a project removed keeps what magpie put in it
+			On   bool // every skill or server given to the agents, or taken from them
+			// Scope is where a server given to a project belongs
+			// (servers/scope), or a project's Pi entry (projects/pi-scope):
+			// "" for its set, ScopeProject for its own folder alone
+			// (project_role.go)
+			Scope string
+			How   string // link or copy: how skills are given to Agent, or to every agent with none (#896)
 			// Replace updates a skill changed here all the same, its
 			// changed version kept with the backups (#1449)
 			Replace bool
@@ -750,6 +774,7 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		}
 		var res *library.Result
 		var err error
+		projectOptions := library.ProjectWriteOptions{Preview: in.Preview, PlanID: in.PlanID}
 		switch r.PathValue("what") + "/" + r.PathValue("action") {
 		case "instructions/save":
 			c := in.InstructionsChange
@@ -764,6 +789,9 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		case "servers/hub":
 			// magpie as the agents' one MCP server (#2679)
 			res, err = library.SetMCPHub(in.On)
+		case "servers/scope":
+			// a project's role, not its copies' (project_role.go)
+			res, err = library.ServerScope(in.Name, in.Scope)
 		case "servers/hub-note":
 			// what the router says of itself to the agents, this
 			// computer's own (settings.RouterNote)
@@ -926,32 +954,62 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			res, err = library.InstallServer(in.ID, in.Values, in.Agents)
 		case "market/skill":
 			res, err = library.InstallMarketSkill(in.Source, in.ID, in.Agents)
+		case "projects/plan":
+			res, err = library.ProjectPlan(in.Dir)
+		case "projects/apply":
+			res, err = library.ProjectApply(in.Dir, projectOptions)
+		case "projects/distribution":
+			res, err = library.ProjectDistribute(in.Dir, in.Distribution, projectOptions)
 		case "projects/add":
-			res, err = library.AddProject(in.Dir)
+			res, err = library.AddProject(in.Dir, projectOptions)
 		case "projects/remove":
-			res, err = library.RemoveProject(in.Dir, in.Keep)
+			res, err = library.RemoveProject(in.Dir, in.Keep, projectOptions)
 		case "projects/skill":
-			res, err = library.ProjectSkill(in.Dir, in.Name, in.Agents)
+			res, err = library.ProjectSkill(in.Dir, in.Name, in.Agents, projectOptions)
 		case "projects/skills":
-			res, err = library.ProjectSkills(in.Dir, in.Names, in.Agents)
+			res, err = library.ProjectSkills(in.Dir, in.Names, in.Agents, projectOptions)
 		case "projects/subagents":
-			res, err = library.ProjectSubagents(in.Dir, oneOrMore(in.Name, in.Names), in.Agents)
+			res, err = library.ProjectSubagents(in.Dir, oneOrMore(in.Name, in.Names), in.Agents, projectOptions)
+		case "projects/hooks":
+			// a project's own hooks (#6874)
+			res, err = library.ProjectHooks(in.Dir, oneOrMore(in.Name, in.Names), in.Agents, projectOptions)
+		case "projects/claude-plugin":
+			// a project turns a Claude Code plugin on or off in its own
+			// settings.local.json (project_claude_plugins.go)
+			res, err = library.ProjectClaudePlugin(in.Dir, in.ID, in.On, projectOptions)
+		case "projects/pi":
+			// a project's own Pi packages or extensions: In.Kind says which,
+			// In.Names the sources. In.Mode picks what happens: "on" gives it,
+			// "off" keeps the entry and stops loading it, "rm" takes it out.
+			// Before, In.On's false meant a removal, so a page had no way to
+			// keep an entry off and bring it back without re-entering it.
+			mode := library.PiRemove
+			if in.On {
+				mode = library.PiOn
+			} else if in.Mode == "off" {
+				mode = library.PiOff
+			}
+			res, err = library.ProjectPiChange(in.Dir, in.Kind, in.Names, mode, projectOptions)
+		case "projects/pi-scope":
+			// where a Pi entry belongs (project_role.go): In.Source the entry,
+			// In.Scope anywhere or project
+			res, err = library.ProjectPiScope(in.Dir, in.Kind, in.Source, in.Scope, projectOptions)
 		case "projects/server":
-			res, err = library.ProjectServer(in.Dir, in.Name, in.Agents)
+			res, err = library.ProjectServer(in.Dir, in.Name, in.Agents, projectOptions)
 		case "projects/server-off":
 			// a Library server turned off in this project only
-			res, err = library.ProjectServerOff(in.Dir, in.Name, in.Agents)
+			res, err = library.ProjectServerOff(in.Dir, in.Name, in.Agents, projectOptions)
 		case "projects/skill-off":
-			res, err = library.ProjectSkillsOff(in.Dir, oneOrMore(in.Name, in.Names), in.Agents)
+			res, err = library.ProjectSkillsOff(in.Dir, oneOrMore(in.Name, in.Names), in.Agents, projectOptions)
 		case "projects/copy":
-			res, err = library.ProjectCopy(in.Dir, in.Copy)
+			res, err = library.ProjectCopy(in.Dir, in.Copy, projectOptions)
 		case "projects/instructions":
 			// the text, the agents (sent as [] for none), or both
 			c := library.ProjectInstr{Text: in.Instr}
 			if in.Agents != nil {
 				c.Agents = &in.Agents
 			}
-			res, err = library.ProjectInstructions(in.Dir, c)
+			res, err = library.ProjectInstructions(in.Dir, c, projectOptions)
 		case "all/sync":
 			res, err = library.Sync()
 		default:
@@ -960,6 +1018,10 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		}
 		if err != nil {
 			fail(rw, err)
+			return
+		}
+		if r.PathValue("what") == "projects" && (in.Preview || r.PathValue("action") == "plan") {
+			writeJSON(rw, res)
 			return
 		}
 		if r.PathValue("what") == "instructions" {
@@ -971,7 +1033,11 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			writeJSON(rw, v)
 			return
 		}
-		v, err := libraryView(res)
+		read := library.Read
+		if r.PathValue("what") == "projects" {
+			read = library.Inspect
+		}
+		v, err := libraryReadWith(res, read)
 		if err != nil {
 			fail(rw, err)
 			return

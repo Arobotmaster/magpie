@@ -16,7 +16,9 @@ import (
 )
 
 const libraryUsage = `magpie library                     what the library gives each agent: instructions, MCP servers, skills
-  magpie library sync                write it into the agents again (after one is installed, or edited by hand)
+  magpie library pi [--json]         list user Pi declarations
+  magpie library pi add|rm|off|on package|extension <source>
+  magpie library sync                explicitly reconcile all user-wide agents and registered projects
   magpie library instructions        print the shared instructions
   magpie library instructions set <file|->   replace them with a file's text (- for stdin)
   magpie library instructions agents <a,b…|none>   the agents that get them
@@ -30,6 +32,9 @@ const libraryUsage = `magpie library                     what the library gives 
   magpie library mcp here <name> <command args…> | off   start a synced server with this command on this computer alone,
                                      the others keeping the synced one (its name, agents and note still sync); off goes back to it
   magpie library mcp off|on <name>   take it from every agent, project and app, keeping its settings; on gives it back as it was
+  magpie library mcp scope <name> anywhere|project   where a server given to a project belongs: anywhere (the default)
+                                     is the project's set, written in each worktree of its repository too; project keeps it in
+                                     the project's own folder alone, for one that is that project's role and not its copies'
   magpie library mcp rm <name>
   magpie library mcp router on|off   give each agent one MCP server, magpie, in place of the library's (magpie runs them, once for every agent)
   magpie library mcp router <name> shared|direct   with the router on, share the server through it (the default) or keep it each
@@ -75,6 +80,9 @@ func libraryCmd(args []string) error {
 	)
 	switch sub, rest := args[1], args[2:]; sub {
 	case "sync":
+		if len(rest) > 0 {
+			return fmt.Errorf("usage: magpie library sync")
+		}
 		res, err = library.Sync()
 	case "instructions":
 		if len(rest) == 0 {
@@ -198,6 +206,17 @@ func libraryCmd(args []string) error {
 		case len(rest) == 2 && (rest[0] == "on" || rest[0] == "off") && !strings.HasPrefix(rest[1], "-"):
 			// off for everyone, kept with its settings; on again as it was
 			res, err = library.ServerOn(rest[1], rest[0] == "on")
+		case len(rest) == 3 && rest[0] == "scope" && !strings.HasPrefix(rest[1], "-"):
+			// a project's role, not its copies' (project_role.go)
+			if res, err = library.ServerScope(rest[1], rest[2]); err == nil {
+				if rest[2] == library.ScopeProject {
+					fmt.Println(green.Render("✓"), rest[1], "belongs to a project's own folder alone: its copies in other worktrees of the repository don't get it, and the router never serves it")
+				} else {
+					fmt.Println(green.Render("✓"), rest[1], "is written in each worktree of the project's repository again")
+				}
+				fmt.Println(muted.Render("  a project's own folder gets it from Library › Projects in the app; a worktree of its repository gets it only if its scope is anywhere"))
+				return nil
+			}
 		case len(rest) == 2 && rest[0] == "rm":
 			res, err = library.RemoveServer(rest[1])
 		case len(rest) == 2 && (rest[0] == "router" || rest[0] == "hub") && (rest[1] == "on" || rest[1] == "off"):
@@ -283,6 +302,12 @@ func libraryCmd(args []string) error {
 		return rtkCmd(rest)
 	case "project", "projects":
 		return libraryProjectCmd(rest)
+	case "pi":
+		return libraryUserPiCmd(rest)
+	case "plugin", "plugins":
+		// the Library's Claude Code plugins (plugin.go), not a provider plugin
+		// (plugins_cli.go): one item whose parts become ordinary library items
+		return libraryBundleCmd(rest, func() error { return fmt.Errorf("usage:\n  %s", libraryBundleUsage) })
 	case "help", "-h", "--help":
 		fmt.Print("  " + libraryUsage)
 		return nil

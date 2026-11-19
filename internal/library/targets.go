@@ -987,10 +987,13 @@ func Targets() []*Target { return targets(false) }
 // everyTarget is Targets with the agents gone for their CLI too: a folder
 // an uninstall left behind is still that agent's own, which a project or
 // an instruction set is never kept in.
-func everyTarget() []*Target { return targets(true) }
+func everyTarget() []*Target {
+	out, _ := targetsAsleep(true, false)
+	return out
+}
 
 func targets(gone bool) []*Target {
-	out, _ := targetsAsleep(gone)
+	out, _ := targetsAsleep(gone, true)
 	return out
 }
 
@@ -998,7 +1001,7 @@ func targets(gone bool) []*Target {
 // running now: none is a target, as its files can't be opened without
 // starting the distro, but the page lists them (asleepView). Each running
 // one's places are kept for when it is stopped (keepShape).
-func targetsAsleep(gone bool) ([]*Target, []*agent.Agent) {
+func targetsAsleep(gone, remember bool) ([]*Target, []*agent.Agent) {
 	var out []*Target
 	var asleep []*agent.Agent
 	own := map[string]bool{}
@@ -1045,7 +1048,7 @@ func targetsAsleep(gone bool) ([]*Target, []*agent.Agent) {
 	}
 	readsWith(out)
 	for _, t := range out {
-		if t.Agent.WSL != "" {
+		if remember && t.Agent.WSL != "" {
 			keepShape(t)
 		}
 	}
@@ -1213,7 +1216,7 @@ func Takes(q, kind string) (string, error) {
 			return "", err
 		}
 	}
-	what := map[string]string{"instructions": "instructions", "mcp": "MCP servers", "skills": "skills"}[kind]
+	what := map[string]string{"instructions": "instructions", "mcp": "MCP servers", "skills": "skills", "hooks": "hooks"}[kind]
 	// an app found by its program alone (Kiro CLI) that isn't here: told
 	// so, not recorded and then given nothing, as Targets leaves it out
 	if app && a.Bin != "" && !a.Detected() {
@@ -1235,7 +1238,12 @@ func Takes(q, kind string) (string, error) {
 		}
 		return "", fmt.Errorf("WSL %s isn't running: start it, and %s can be given %s", a.WSL, a.Name, what)
 	}
-	if t != nil {
+	if kind == "hooks" {
+		// A project's hooks go into the project's own file, which is not
+		// the agent's user-wide one (project_hooks.go): an agent is asked
+		// for a project's hooks place, not for its hooks file of the user's.
+		has = ProjectHooksFile(a.ID) != ""
+	} else if t != nil {
 		switch kind {
 		case "instructions":
 			has = t.Instructions != ""

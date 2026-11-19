@@ -168,11 +168,11 @@ func (l *Library) syncProjectMCP(p *Project, hubs map[string]*Server, fail func(
 			continue
 		}
 		abs := filepath.Join(p.Dir, filepath.FromSlash(rel))
-		f := &mcpFile{Path: abs, Format: format, NoCmdRefs: rel == projectMCPFiles["droid"].rel}
+		dst, err := p.file(abs)
+		f := &mcpFile{Path: dst, Format: format, NoCmdRefs: rel == projectMCPFiles["droid"].rel}
 		had := p.Wrote[rel]
 		was := p.Startup[rel]
 		now := map[string]float64{}
-		err := p.inside(abs)
 		var entries map[string]map[string]any
 		if err == nil {
 			entries, err = f.entries()
@@ -215,7 +215,7 @@ func (l *Library) syncProjectMCP(p *Project, hubs map[string]*Server, fail func(
 					continue
 				}
 			}
-			if !exists(abs) {
+			if !exists(dst) {
 				if err := p.mkdirs(filepath.Dir(abs)); err != nil {
 					fail("mcp:"+s.Name, err)
 					continue
@@ -250,8 +250,8 @@ func (l *Library) syncProjectMCP(p *Project, hubs map[string]*Server, fail func(
 		// a file magpie made goes once nothing is left in it; one with
 		// anything of the user's in it is the user's from then on
 		if i := slices.Index(p.MadeFiles, rel); i >= 0 {
-			if blankFile(abs, format) {
-				if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
+			if blankFile(dst, format) {
+				if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
 					fail("", err)
 					continue
 				}
@@ -303,8 +303,8 @@ func blankMap(m map[string]any) bool {
 
 // ProjectServer sets which agents get a library server in a project; none
 // takes it out of the project.
-func ProjectServer(dir, name string, agents []string) (*Result, error) {
-	return change(func(l *Library) error {
+func ProjectServer(dir, name string, agents []string, options ...ProjectWriteOptions) (*Result, error) {
+	return changeProject(dir, projectServers, func(l *Library) error {
 		p := l.project(dir)
 		if p == nil {
 			return fmt.Errorf("no project %s", dir)
@@ -328,7 +328,7 @@ func ProjectServer(dir, name string, agents []string) (*Result, error) {
 		}
 		p.Servers[name] = ids
 		return nil
-	})
+	}, options...)
 }
 
 // renameProjectServers has the projects give a server its new name.

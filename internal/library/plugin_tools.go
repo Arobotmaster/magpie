@@ -55,7 +55,7 @@ func init() {
 		if changed, err := adoptPluginTools(); err != nil {
 			log.Printf("library: giving plugin tools a server: %v", err)
 		} else if changed {
-			if _, err := Sync(); err != nil {
+			if _, err := SyncAgents(); err != nil {
 				log.Printf("library: syncing after plugin tools: %v", err)
 			}
 		}

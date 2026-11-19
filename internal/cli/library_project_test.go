@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -19,8 +20,12 @@ import (
 // project folder app, the folder the test runs in.
 func projectSandbox(t *testing.T) (proj string) {
 	t.Helper()
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is required for the project fixture")
+	}
 	h := t.TempDir()
-	for k, v := range map[string]string{"HOME": h, "USERPROFILE": h, "XDG_CONFIG_HOME": filepath.Join(h, ".config"), "XDG_STATE_HOME": "", "APPDATA": "", "LOCALAPPDATA": "", "PATH": filepath.Join(h, "bin")} {
+	for k, v := range map[string]string{"HOME": h, "USERPROFILE": h, "XDG_CONFIG_HOME": filepath.Join(h, ".config"), "XDG_STATE_HOME": "", "APPDATA": "", "LOCALAPPDATA": "", "PATH": filepath.Join(h, "bin") + string(os.PathListSeparator) + filepath.Dir(git)} {
 		t.Setenv(k, v)
 	}
 	for _, k := range agentenv.Vars {
@@ -51,6 +56,9 @@ func projectSandbox(t *testing.T) (proj string) {
 	work := t.TempDir()
 	proj = filepath.Join(work, "app")
 	put(filepath.Join(proj, ".gitignore"), "node_modules/\n")
+	if out, err := exec.Command(git, "init", "-q", "--template=", proj).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
 	if p, err := filepath.EvalSymlinks(proj); err == nil {
 		proj = p
 	}
@@ -242,16 +250,26 @@ func TestLibraryProjectInstructionsCmd(t *testing.T) {
 		}
 		return string(b)
 	}
-	if err := os.WriteFile(filepath.Join(proj, "CLAUDE.md"), []byte("Mine.\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+
 	must("add", ".")
-	if out := must("instructions", "."); !strings.Contains(out, "No instructions") {
+	if out := must("instructions", "."); !strings.Contains(out, "No instructions of its own") {
 		t.Errorf("show:\n%s", out)
 	}
-	must("instructions", ".", "text", "Use", "pnpm", "here.")
+	args := []string{"instructions", ".", "text", "Use", "pnpm", "here."}
+	preview := must(append([]string{"--plan"}, args...)...)
+	if !strings.Contains(preview, "CLAUDE.md") {
+		t.Fatalf("preview lacks the destination: %s", preview)
+	}
+	if _, err := os.Lstat(filepath.Join(proj, "CLAUDE.md")); !os.IsNotExist(err) {
+		t.Fatalf("preview wrote project instructions: %v", err)
+	}
+	_, id, ok := strings.Cut(preview, "Plan ID ")
+	if !ok {
+		t.Fatalf("preview lacks its ID: %s", preview)
+	}
+	must(append([]string{"--plan-id=" + strings.TrimSpace(id)}, args...)...)
 	part := "<!-- magpie:begin · written by magpie from its Library -->\nUse pnpm here.\n<!-- magpie:end -->\n"
-	if got := read("CLAUDE.md"); got != "Mine.\n\n"+part {
+	if got := read("CLAUDE.md"); got != part {
 		t.Errorf("CLAUDE.md = %q", got)
 	}
 	if got := read("AGENTS.md"); got != part {
@@ -269,6 +287,9 @@ func TestLibraryProjectInstructionsCmd(t *testing.T) {
 	}
 	if out, err := projectOut(t, "instructions", ".", "agents", "zed"); err == nil {
 		t.Errorf("zed was taken:\n%s", out)
+	}
+	if err := os.WriteFile(filepath.Join(proj, "CLAUDE.md"), []byte("Mine.\n\n"+part), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	must("instructions", ".", "agents", "none")
 	if got := read("CLAUDE.md"); got != "Mine.\n" {

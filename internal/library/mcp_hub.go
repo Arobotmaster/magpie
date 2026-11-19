@@ -83,8 +83,12 @@ const HubDirect = "direct"
 // user keeps direct (Server.Hub), and magpie's own image server to an
 // agent in WSL, which is given it run in its distro (mcpFile.side) for the
 // paths it saves to be the agent's.
+//
+// A server scoped to one project folder is written as its own entry
+// (syncProjectMCP). The shared router covers other worktrees and never
+// serves that server through its project-wide address.
 func inHub(s *Server, id string) bool {
-	return s.Hub != HubDirect && (!isSelf(s) || !strings.Contains(id, "@wsl:"))
+	return s.Hub != HubDirect && !s.scoped() && (!isSelf(s) || !strings.Contains(id, "@wsl:"))
 }
 
 // ServerHub shares a server through the hub, or keeps it each agent's own

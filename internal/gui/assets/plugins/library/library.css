@@ -244,6 +244,10 @@ button.row.lib-hubfolded:hover { background: var(--pill); }
 .lib-tag.lib-unchecked.link:hover { color: var(--fg-2); }
 .lib-tag.lib-signed { color: var(--green); background: var(--green-soft); }
 .lib-tag.lib-signed::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+/* a project's role, not its copies' (project_role.go) */
+.lib-tag.lib-scope { color: var(--amber); background: var(--amber-soft); }
+.lib-tag.lib-scope::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.lib-scopebox .segs { flex: none; }
 
 /* magpie's sign-in to a remote server, in its editor (#615) */
 .lib-signin-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 28px; }
@@ -693,7 +697,7 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-tag.lib-dot::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--muted); }
 .lib-projopts { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 8px 12px 8px 49px; border-top: 1px solid var(--line-2); background: var(--card-2); }
 .lib-projopts .note { font-size: 11px; color: var(--faint); line-height: 1.45; min-width: 0; flex: 1 1 220px; }
-.lib-projopts .lib-projpick { height: 26px; color: var(--fg); }
+.lib-projopts .lib-projpick, .lib-projopts .lib-projwrite { height: 26px; color: var(--fg); }
 .lib-projcopy { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--fg-2); cursor: default; }
 .lib-project .lib-projskill { border-top: 1px solid var(--line-2); }
 .lib-projfoot { margin: 0; padding: 8px 12px 10px 49px; border-top: 1px solid var(--line-2); }
@@ -986,3 +990,21 @@ input.lib-memq:focus, input.lib-memtags:focus, input.lib-memwhy:focus { border-c
 .lib-rulefile { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex-wrap: wrap; }
 .lib-rulefile > .note { flex: none; font-size: 12px; color: var(--fg-2); }
 .lib-rulefile > .lib-path { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+
+.lib-project-native { margin: 0; padding: 0; list-style: none; }
+.lib-project-native-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  padding: 5px 12px;
+  overflow-wrap: anywhere;
+}
+.lib-plugin-origins { padding: 8px 12px; }
+.lib-plugin-origin { padding: 7px 0; overflow-wrap: anywhere; }
+.lib-plugin-origin > summary { cursor: pointer; }
+.lib-plugin-origin-sub { display: block; padding-inline-start: 16px; color: var(--fg-2); font-size: 12px; }
+
+.lib-write-scope, .lib-write-plan { grid-column: 1 / -1; min-width: 0; }
+.lib-write-scope { border: 1px solid var(--line); border-radius: 8px; }
+.lib-write-plan { overflow-wrap: anywhere; max-height: 240px; overflow-y: auto; }

@@ -3,9 +3,9 @@ package library
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -18,15 +18,22 @@ import (
 // agent reads a project's skills from, and kept out of git.
 type Project struct {
 	Dir string `json:"dir"`
+	// Distribution is opt-in for each category in this project's worktrees.
+	Distribution ProjectDistribution `json:"distribution,omitzero"`
+	writes       *projectWrites
+	removeAfter  bool
 	// Copy puts copies of the skills there, not links to the library's
 	// (for Windows, or a folder synced or shared where a link won't do);
-	// a copy is made again when the library's skill changes
+	// an unchanged copy is refreshed during project or full sync
 	Copy bool `json:"copy,omitempty"`
 	// Skills are the library's skills the project has, and for which agents
 	Skills map[string][]string `json:"skills,omitempty"`
 	// Placed are the entries magpie put in the folder (.claude/skills/pdf),
 	// the only ones it ever takes away
 	Placed []string `json:"placed,omitempty"`
+	// SkillLinks records the links magpie made for Claude to read the
+	// project's own shared skills, by path and link target.
+	SkillLinks map[string]string `json:"skillLinks,omitempty"`
 	// Made are the folders magpie made to place them in, taken away again
 	// once they're empty; Gitignore is whether it made the .gitignore
 	Made      []string `json:"made,omitempty"`
@@ -71,6 +78,41 @@ type Project struct {
 	Instr       string      `json:"instr,omitempty"`
 	InstrAgents []string    `json:"instrAgents,omitempty"`
 	InstrFiles  []InstrFile `json:"instrFiles,omitempty"`
+	// PiOff are the Pi sources the project keeps but has turned off, written
+	// as Pi's own "-<source>" entries so turning one back on needs no re-entry
+	PiOff []string `json:"piOff,omitempty"`
+	// Hooks are the library's hooks the project has, and for which agents;
+	// HookFiles the entries magpie wrote for them, by their canonical form
+	// (project_hooks.go, #6874)
+	Hooks     map[string][]string `json:"hooks,omitempty"`
+	HookFiles []HookFile          `json:"hookFiles,omitempty"`
+	// Pi are the Pi packages and extensions the project has, by kind
+	// ("package", "extension"); PiEntries are the ones magpie wrote into
+	// its own .pi/settings.json, by source and kind (project_pi.go)
+	Pi        map[string][]string `json:"pi,omitempty"`
+	PiEntries []PiEntry           `json:"piEntries,omitempty"`
+	// PiMade is whether magpie made the project's .pi/settings.json itself.
+	// Only a file magpie made may be kept out of git for its scoped entries
+	// (project_role.go): one the user already had is left to their own
+	// .gitignore as every project file is.
+	PiMade bool `json:"piMade,omitempty"`
+	// ClaudePlugins are the Claude Code plugins the project turns on or off
+	// in its own settings.local.json; ClaudeWritten is the value magpie
+	// last wrote for each, so only that is ever taken away again
+	// (project_claude_plugins.go)
+	ClaudePlugins map[string]bool `json:"claudePlugins,omitempty"`
+	ClaudeWritten map[string]bool `json:"claudeWritten,omitempty"`
+	ClaudeMade    bool            `json:"claudeMade,omitempty"`
+}
+
+// HookFile is one entry magpie wrote for a project's hook: the hook it is
+// of, the project's file and event it is under, and the entry's canonical
+// form, which is what it is compared by when it is taken away again.
+type HookFile struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	Event string `json:"event"`
+	Hash  string `json:"hash"`
 }
 
 // projectSkillsDirs is where, in a project, each agent reads skills of its
@@ -136,38 +178,65 @@ const (
 	ignoreEnd   = "# <<< magpie <<<"
 )
 
-// syncProjects places the library's skills in every project as it says.
-func (l *Library) syncProjects(res *Result) {
-	for _, p := range l.Projects {
-		l.syncProject(p, res)
-	}
-}
-
-func (l *Library) syncProject(p *Project, res *Result) {
+// syncProject reconciles only the selected project's resources.
+func (l *Library) syncProject(p *Project, res *Result, parts projectParts) {
 	if fi, err := os.Stat(p.Dir); err != nil || !fi.IsDir() {
-		if len(p.Skills) > 0 || len(p.Servers) > 0 || len(p.Subagents) > 0 || len(p.ServersOff) > 0 || len(p.SkillsOff) > 0 || p.Instr != "" && len(p.InstrAgents) > 0 || p.holds() {
-			res.Problems = append(res.Problems, Problem{Agent: p.Dir, What: "project:", Error: "the folder is gone"})
-		}
+		res.fail(p.Dir, "project:", fmt.Errorf("the folder is gone or inaccessible"))
 		return
 	}
-	hubs := l.projectHubs(p)
-	l.syncFolder(p, res, hubs)
-	l.syncClaudeLocal(p, hubs["claude"], func(what string, err error) {
-		res.Problems = append(res.Problems, Problem{Agent: p.Dir, What: "project:" + what, Error: err.Error()})
-	})
-	l.syncTrees(p, res, hubs)
+	var hubs map[string]*Server
+	if parts&projectServers != 0 {
+		hubs = l.projectHubs(p)
+	}
+	if parts&projectSkills != 0 {
+		p.syncSkillLinks(!p.removeAfter, res)
+	}
+	l.syncFolder(p, res, hubs, parts)
+	if parts&projectServers != 0 {
+		l.syncClaudeLocal(p, hubs["claude"], func(what string, err error) {
+			res.fail(p.Dir, "project:"+what, err)
+		})
+	}
+	l.syncTrees(p, res, parts)
+	p.planTidy()
 	if err := p.keepOutOfGit(); err != nil {
-		res.Problems = append(res.Problems, Problem{Agent: p.Dir, What: "project:", Error: "keeping it out of git: " + err.Error()})
+		res.fail(p.Dir, "project:", fmt.Errorf("keeping it out of git: %w", err))
 	}
 }
 
-// syncFolder places the project's skills and writes its servers, and what
-// it turns off, in one folder: the project's, or its folder in another
-// worktree (syncTrees), whose agents are given the same hub entries.
-func (l *Library) syncFolder(p *Project, res *Result, hubs map[string]*Server) {
+func (l *Library) syncFolder(p *Project, res *Result, hubs map[string]*Server, parts projectParts) {
 	fail := func(name string, err error) {
-		res.Problems = append(res.Problems, Problem{Agent: p.Dir, What: "project:" + name, Error: err.Error()})
+		if errors.Is(err, errProjectAlreadyHas) {
+			res.Skipped = append(res.Skipped, Problem{Agent: p.Dir, What: "project:" + name, Error: err.Error()})
+		} else {
+			res.fail(p.Dir, "project:"+name, err)
+		}
 	}
+	if parts&projectSkills != 0 {
+		l.syncProjectSkills(p, fail)
+		l.syncSkillsOff(p, fail)
+	}
+	if parts&projectServers != 0 {
+		l.syncProjectMCP(p, hubs, fail)
+	}
+	if parts&projectRoles != 0 {
+		l.syncProjectSubagents(p, fail)
+	}
+	if parts&projectInstructions != 0 {
+		l.syncProjectInstr(p, fail)
+	}
+	if parts&projectHooks != 0 {
+		l.syncProjectHooks(p, fail)
+	}
+	if parts&projectPi != 0 {
+		l.syncProjectPi(p, fail)
+	}
+	if parts&projectPlugins != 0 {
+		l.syncProjectClaudePlugins(p, fail)
+	}
+}
+
+func (l *Library) syncProjectSkills(p *Project, fail func(string, error)) {
 	want := map[string]string{} // entry → the skill
 	// the entries given as copies: all of them in a project that takes
 	// copies, else those an agent reads that skips a junction
@@ -195,12 +264,7 @@ func (l *Library) syncFolder(p *Project, res *Result, hubs map[string]*Server) {
 		if !ours(abs, name) {
 			continue // gone, or the user's own by now: forgotten, left as it is
 		}
-		if err := p.inside(filepath.Dir(abs)); err != nil {
-			fail(name, err)
-			placed = append(placed, e)
-			continue
-		}
-		if err := unlink(abs); err != nil {
+		if err := p.planSkill(abs, name, false, true); err != nil {
 			fail(name, err)
 			placed = append(placed, e)
 		}
@@ -212,29 +276,34 @@ func (l *Library) syncFolder(p *Project, res *Result, hubs map[string]*Server) {
 			}
 		}
 	})
+	native := map[string][]ProjectResource{}
+	for _, e := range entries {
+		dir := filepath.ToSlash(filepath.Dir(e))
+		if _, ok := native[dir]; !ok {
+			native[dir] = p.nativeSkills(dir)
+		}
+	}
 	for _, e := range entries {
 		name := want[e]
-		switch err := p.place(e, name, copies[e]); {
+		dir := filepath.ToSlash(filepath.Dir(e))
+		if p.SkillLinks[e] != "" || nativeSkill(native[dir], name) {
+			fail(name, fmt.Errorf("%w %s (%s)", errProjectAlreadyHas, name, dir))
+			continue
+		}
+		switch err := p.planSkill(filepath.Join(p.Dir, filepath.FromSlash(e)), name, copies[e], false); {
 		case err == nil:
 			placed = append(placed, e)
 		case errors.Is(err, errForeign):
 			fail(name, fmt.Errorf("%s is in the project already and isn't magpie's: it's left as it is", e))
 		default:
 			fail(name, err)
-			if ours(filepath.Join(p.Dir, filepath.FromSlash(e)), name) {
+			if slices.Contains(p.Placed, e) {
 				placed = append(placed, e)
 			}
 		}
 	}
 	sort.Strings(placed)
 	p.Placed = placed
-	l.syncProjectMCP(p, hubs, func(what string, err error) {
-		res.Problems = append(res.Problems, Problem{Agent: p.Dir, What: "project:" + what, Error: err.Error()})
-	})
-	l.syncSkillsOff(p, fail)
-	l.syncProjectSubagents(p, func(what string, err error) { fail(what, err) })
-	l.syncProjectInstr(p, fail)
-	p.tidy()
 }
 
 // keepOutOfGit keeps what magpie placed in the project, and in its folder
@@ -246,58 +315,21 @@ func (p *Project) keepOutOfGit() error {
 	if err := p.writeIgnore(); err != nil {
 		return fmt.Errorf(".gitignore: %w", err)
 	}
-	g, ok := gitOf(p.Dir)
-	if !ok {
+	g := p.writes.repository(realDir(p.Dir))
+	if g.err != nil {
+		return g.err
+	}
+	if g.where.Top == "" {
 		return nil
 	}
 	entries := p.ignored()
 	for _, t := range p.Trees {
 		entries = append(entries, t.ignored()...)
 	}
-	return p.writeExclude(g, entries)
+	return p.writeExclude(g.where, entries)
 }
 
 var errForeign = errors.New("not magpie's")
-
-// place puts a skill at e in the project: a link to the library's, or a
-// copy made again whenever the library's differs from it.
-func (p *Project) place(e, name string, asCopy bool) error {
-	abs := filepath.Join(p.Dir, filepath.FromSlash(e))
-	// the entry is magpie's own link to the library: the folder it is in
-	// is what must be the project's
-	if err := p.inside(filepath.Dir(abs)); err != nil {
-		return err
-	}
-	if fi, err := os.Lstat(abs); err == nil {
-		if !ours(abs, name) {
-			return errForeign
-		}
-		link := linkEntry(fi)
-		// a copy stands for a link on Windows without the right to make one
-		if !asCopy && link {
-			return nil
-		}
-		if !link {
-			current, err := copyIsFresh(abs, hashDir(realDir(skillDir(name))), false)
-			if err != nil {
-				return err
-			}
-			if (asCopy || runtime.GOOS == "windows") && current {
-				return nil
-			}
-		}
-	}
-	if err := p.mkdirs(filepath.Dir(abs)); err != nil {
-		return err
-	}
-	if !asCopy {
-		if err := unlink(abs); err != nil {
-			return err
-		}
-		return link(abs, name)
-	}
-	return copyIn(abs, name)
-}
 
 // inside is an error when abs, links followed, isn't in the project's
 // folder. A project is often a repository someone else wrote, and a link
@@ -342,8 +374,10 @@ func (p *Project) mkdirs(dir string) error {
 		}
 		made = append(made, d)
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+	if p.writes == nil {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
 	}
 	for _, d := range made {
 		rel, _ := filepath.Rel(p.Dir, d)
@@ -352,26 +386,6 @@ func (p *Project) mkdirs(dir string) error {
 		}
 	}
 	return nil
-}
-
-// tidy takes away the folders magpie made that are empty now, the deepest
-// first; one with anything in it stays.
-func (p *Project) tidy() {
-	sort.Slice(p.Made, func(i, j int) bool { return len(p.Made[i]) > len(p.Made[j]) })
-	var kept []string
-	for _, rel := range p.Made {
-		d := filepath.Join(p.Dir, filepath.FromSlash(rel))
-		if es, err := os.ReadDir(d); err == nil && len(es) == 0 {
-			if os.Remove(d) == nil {
-				continue
-			}
-		} else if os.IsNotExist(err) {
-			continue
-		}
-		kept = append(kept, rel)
-	}
-	sort.Strings(kept)
-	p.Made = kept
 }
 
 // writeIgnore takes the lines an older magpie kept in the project's
@@ -385,6 +399,14 @@ func (p *Project) writeIgnore() error {
 			return err
 		}
 	}
+	if _, err := os.Lstat(f); errors.Is(err, os.ErrNotExist) {
+		p.Gitignore = false
+		return nil
+	}
+	f, err := p.file(f)
+	if err != nil {
+		return err
+	}
 	b, err := os.ReadFile(f)
 	if os.IsNotExist(err) {
 		p.Gitignore = false
@@ -396,6 +418,9 @@ func (p *Project) writeIgnore() error {
 	nl := "\n"
 	if strings.Contains(string(b), "\r\n") {
 		nl = "\r\n"
+	}
+	if !strings.Contains(strings.ReplaceAll(string(b), "\r\n", "\n"), ignoreBegin+"\n") {
+		return nil
 	}
 	out := strings.ReplaceAll(stripIgnore(strings.ReplaceAll(string(b), "\r\n", "\n")), "\n", nl)
 	if out == string(b) {
@@ -415,7 +440,7 @@ func stripIgnore(s string) string { return stripBlock(s, ignoreBegin) }
 // ---- changing -------------------------------------------------------------
 
 // AddProject adds a folder whose agents can be given library skills.
-func AddProject(dir string) (*Result, error) {
+func AddProject(dir string, options ...ProjectWriteOptions) (*Result, error) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		return nil, fmt.Errorf("choose a project's folder")
@@ -427,10 +452,14 @@ func AddProject(dir string) (*Result, error) {
 	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
 		return nil, fmt.Errorf("%s isn't a folder", dir)
 	}
+	// Keep the registered root stable when the selection was through a link.
+	if fi, err := os.Lstat(dir); err == nil && linkEntry(fi) {
+		dir = realDir(dir)
+	}
 	if err := notGlobal(dir); err != nil {
 		return nil, err
 	}
-	return change(func(l *Library) error {
+	return changeProject(dir, 0, func(l *Library) error {
 		for _, p := range l.Projects {
 			if realDir(p.Dir) == realDir(dir) {
 				return fmt.Errorf("%s is a project already", p.Dir)
@@ -438,7 +467,7 @@ func AddProject(dir string) (*Result, error) {
 		}
 		l.Projects = append(l.Projects, &Project{Dir: dir})
 		return nil
-	})
+	}, options...)
 }
 
 // notGlobal refuses a folder whose skills folders are an agent's own for
@@ -510,8 +539,8 @@ func ProjectAt(dir string) (string, error) {
 // skills or servers once, to keep them): everything magpie put in the
 // folder — skills, servers in the agents' files, its lines in the
 // .gitignore — stays as it is, the user's from then on.
-func RemoveProject(dir string, keep bool) (*Result, error) {
-	return change(func(l *Library) error {
+func RemoveProject(dir string, keep bool, options ...ProjectWriteOptions) (*Result, error) {
+	return changeProject(dir, projectAll, func(l *Library) error {
 		p := l.project(dir)
 		if p == nil {
 			return fmt.Errorf("no project %s", dir)
@@ -529,31 +558,32 @@ func RemoveProject(dir string, keep bool) (*Result, error) {
 		if fi, err := os.Stat(p.Dir); errors.Is(err, os.ErrNotExist) || err == nil && !fi.IsDir() {
 			// Claude Code's record of it isn't in the folder
 			p.ServersOff = nil
-			l.syncClaudeLocal(p, nil, func(string, error) {})
 			l.Projects = slices.DeleteFunc(l.Projects, func(x *Project) bool { return x == p })
 			return nil
 		}
-		p.Skills, p.Servers, p.ServersOff, p.SkillsOff, p.Subagents, p.InstrAgents = nil, nil, nil, nil, nil, nil
-		l.syncProject(p, &Result{})
-		if !p.holds() && p.Claude == nil && !slices.ContainsFunc(p.Trees, (*Project).holds) {
-			l.Projects = slices.DeleteFunc(l.Projects, func(x *Project) bool { return x == p })
-		}
+		// PiEntries stays for the sync below: it is what tells sync which
+		// entries in the project's own .pi/settings.json are magpie's to
+		// take away. Sync clears the records it acted on.
+		p.Skills, p.Servers, p.ServersOff, p.SkillsOff, p.Subagents, p.Hooks, p.Pi, p.ClaudePlugins, p.InstrAgents = nil, nil, nil, nil, nil, nil, nil, nil, nil
+		p.PiOff = nil
+		p.removeAfter = true
 		return nil
-	})
+	}, options...)
 }
 
 // ProjectSkill sets which agents get a library skill in a project; none
 // takes it out of the project.
-func ProjectSkill(dir, name string, agents []string) (*Result, error) {
-	return ProjectSkills(dir, []string{name}, agents)
+func ProjectSkill(dir, name string, agents []string, options ...ProjectWriteOptions) (*Result, error) {
+	return ProjectSkills(dir, []string{name}, agents, options...)
 }
 
 // ProjectSkills sets which agents get each of some library skills in a
 // project, in one write: the skills a project's card picks from its menu
 // (POM_JUMPING on X). The project's other skills stay as they are; none
 // takes these out of it.
-func ProjectSkills(dir string, names, agents []string) (*Result, error) {
-	return change(func(l *Library) error {
+func ProjectSkills(dir string, names, agents []string, options ...ProjectWriteOptions) (*Result, error) {
+	var skipped []Problem
+	res, err := changeProject(dir, projectSkills, func(l *Library) error {
 		p := l.project(dir)
 		if p == nil {
 			return fmt.Errorf("no project %s", dir)
@@ -567,47 +597,72 @@ func ProjectSkills(dir string, names, agents []string) (*Result, error) {
 			}
 		}
 		var ids []string
+		native := map[string][]ProjectResource{}
 		for _, id := range agents {
-			if ProjectSkillsDir(id) == "" {
+			dir := ProjectSkillsDir(id)
+			if dir == "" {
 				return fmt.Errorf("magpie knows of no folder %s reads a project's skills from", id)
+			}
+			if _, ok := native[dir]; !ok {
+				native[dir] = p.nativeSkills(dir)
 			}
 			ids = set(ids, id, true)
 		}
+		if _, claude := native[".claude/skills"]; claude {
+			if _, shared := native[".agents/skills"]; !shared {
+				native[".agents/skills"] = p.nativeSkills(".agents/skills")
+			}
+		}
 		for _, name := range names {
-			if len(ids) == 0 {
+			keep := slices.DeleteFunc(slices.Clone(ids), func(id string) bool {
+				if path := ProjectSkillsDir(id); p.nativeSkillAt(native, path, name) {
+					skipped = append(skipped, projectSkip(p, name, name, path))
+					return true
+				}
+				return false
+			})
+			if len(keep) == 0 {
 				delete(p.Skills, name)
 				continue
 			}
 			if p.Skills == nil {
 				p.Skills = map[string][]string{}
 			}
-			p.Skills[name] = slices.Clone(ids)
+			p.Skills[name] = keep
 		}
 		return nil
-	})
+	}, options...)
+	return withProjectSkips(res, skipped), err
 }
 
 // ProjectCopy sets whether a project gets copies of its skills rather than
 // links; those there are made again the other way.
-func ProjectCopy(dir string, copy bool) (*Result, error) {
-	return change(func(l *Library) error {
+func ProjectCopy(dir string, copy bool, options ...ProjectWriteOptions) (*Result, error) {
+	return changeProject(dir, projectSkills, func(l *Library) error {
 		p := l.project(dir)
 		if p == nil {
 			return fmt.Errorf("no project %s", dir)
 		}
 		p.Copy = copy
 		return nil
-	})
+	}, options...)
 }
 
 // ProjectView is a project as the page shows it.
 type ProjectView struct {
-	Dir     string              `json:"dir"`
-	Name    string              `json:"name"`
-	Copy    bool                `json:"copy"`
-	Skills  map[string][]string `json:"skills"`
-	Placed  []string            `json:"placed"`
-	Servers map[string][]string `json:"servers"`
+	Native       map[string][]ProjectResource `json:"native,omitempty"`
+	SkillLinks   map[string]string            `json:"skillLinks,omitempty"`
+	Distribution ProjectDistribution          `json:"distribution"`
+	Dir          string                       `json:"dir"`
+	Name         string                       `json:"name"`
+	Copy         bool                         `json:"copy"`
+	Skills       map[string][]string          `json:"skills"`
+	Placed       []string                     `json:"placed"`
+	Servers      map[string][]string          `json:"servers"`
+	// Scoped are the servers of the project's set its own folder alone gets:
+	// the ones a copy in another worktree of the repository doesn't
+	// (project_role.go)
+	Scoped []string `json:"scoped"`
 	// Wrote are, by the project's file, the servers magpie wrote there
 	Wrote map[string][]string `json:"wrote"`
 	// ServersOff and SkillsOff are the Library's servers and skills
@@ -627,7 +682,23 @@ type ProjectView struct {
 	Instr       string   `json:"instr"`
 	InstrAgents []string `json:"instrAgents"`
 	InstrFiles  []string `json:"instrFiles"`
-	Missing     bool     `json:"missing,omitempty"` // the folder is gone
+	// Hooks are the library's hooks the project has, for the agents named,
+	// and HookFiles the project's entries magpie wrote for them (#6874)
+	Hooks     map[string][]string `json:"hooks"`
+	HookFiles []HookFile          `json:"hookFiles"`
+	// Pi are the Pi packages and extensions the project has, and PiEntries
+	// the ones magpie wrote into its own .pi/settings.json
+	Pi        map[string][]string `json:"pi"`
+	PiEntries []PiEntry           `json:"piEntries"`
+	// ClaudePlugins are the Claude Code plugins the project turns on or off
+	ClaudePlugins map[string]bool `json:"claudePlugins"`
+	// PiScoped are, by kind, the Pi entries the project's own folder alone
+	// has: a worktree of its repository doesn't load them (project_role.go).
+	// PiKeptOutOfGit is whether magpie keeps the project's .pi/settings.json
+	// out of git for them.
+	PiScoped       map[string][]string `json:"piScoped,omitempty"`
+	PiKeptOutOfGit bool                `json:"piKeptOutOfGit,omitempty"`
+	Missing        bool                `json:"missing,omitempty"` // the folder is gone
 	// Problems are, by skill ("" for the project's own), what couldn't be done
 	Problems map[string]string `json:"problems,omitempty"`
 }
@@ -635,7 +706,9 @@ type ProjectView struct {
 func projectViews(l *Library, problems []Problem) []ProjectView {
 	out := []ProjectView{}
 	for _, p := range l.Projects {
-		v := ProjectView{Dir: p.Dir, Name: filepath.Base(p.Dir), Copy: p.Copy, Skills: map[string][]string{}, Placed: append([]string{}, p.Placed...)}
+		v := ProjectView{Dir: p.Dir, Name: filepath.Base(p.Dir), Copy: p.Copy, Distribution: p.Distribution, Skills: map[string][]string{}, Placed: append([]string{}, p.Placed...)}
+		v.Native = p.nativeResources()
+		v.SkillLinks = maps.Clone(p.SkillLinks)
 		for k, a := range p.Skills {
 			v.Skills[k] = append([]string{}, a...)
 		}
@@ -643,6 +716,8 @@ func projectViews(l *Library, problems []Problem) []ProjectView {
 		for k, a := range p.Servers {
 			v.Servers[k] = append([]string{}, a...)
 		}
+		// the ones its copies don't get, for the page to say so
+		v.Scoped = l.scopedServers(p)
 		for k, a := range p.Wrote {
 			v.Wrote[k] = append([]string{}, a...)
 		}
@@ -664,6 +739,38 @@ func projectViews(l *Library, problems []Problem) []ProjectView {
 		v.Subagents = map[string][]string{}
 		for k, a := range p.Subagents {
 			v.Subagents[k] = append([]string{}, a...)
+		}
+		v.Hooks = map[string][]string{}
+		for k, a := range p.Hooks {
+			v.Hooks[k] = append([]string{}, a...)
+		}
+		v.HookFiles = []HookFile{}
+		v.HookFiles = append(v.HookFiles, p.HookFiles...)
+		v.PiEntries = []PiEntry{}
+		v.PiEntries = append(v.PiEntries, p.PiEntries...)
+		for i := range v.PiEntries {
+			e := &v.PiEntries[i]
+			if e.Raw != "" {
+				e.Off = !piEntryOn(e.Kind, []byte(e.Raw))
+			}
+		}
+		v.Pi = map[string][]string{}
+		for k, a := range p.Pi {
+			v.Pi[k] = append([]string{}, a...)
+		}
+		v.PiScoped = map[string][]string{}
+		for _, kind := range []string{"package", "extension"} {
+			if scoped := p.piScopedSources(kind); len(scoped) > 0 {
+				v.PiScoped[kind] = scoped
+			}
+		}
+		if len(v.PiScoped) == 0 {
+			v.PiScoped = nil
+		}
+		v.PiKeptOutOfGit = slices.Contains(p.MadeFiles, piSettingsRel)
+		v.ClaudePlugins = map[string]bool{}
+		for k, b := range p.ClaudePlugins {
+			v.ClaudePlugins[k] = b
 		}
 		for _, t := range p.Trees {
 			v.Trees = append(v.Trees, t.Dir)

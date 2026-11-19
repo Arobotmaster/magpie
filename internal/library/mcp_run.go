@@ -117,7 +117,7 @@ func init() {
 			runs.Unlock()
 			if !seen || was != runsFor(t, gatewayOf(t)) {
 				go func() {
-					if _, err := Sync(); err != nil {
+					if _, err := SyncAgents(); err != nil {
 						log.Printf("library: syncing %s's MCP servers: %v", id, err)
 					}
 				}()

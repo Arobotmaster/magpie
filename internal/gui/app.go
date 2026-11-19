@@ -615,7 +615,7 @@ func Run(version string, showMain bool, link string) error {
 	// the library written into the agents again, once: one installed or
 	// updated since (or an edit by hand) gets it without a visit to the page
 	go func() {
-		if res, err := library.Sync(); err != nil {
+		if res, err := library.SyncAgents(); err != nil {
 			log.Println("library sync:", err)
 		} else {
 			for _, p := range res.Problems {

@@ -1505,6 +1505,12 @@ func devecoDir(cfg string) string {
 
 func pi(home string) *Agent { return piIn(here(home)) }
 
+// LocalPiDir is the agent directory of Pi on this machine.
+func LocalPiDir() string {
+	home, _ := os.UserHomeDir()
+	return piDir(here(home))
+}
+
 // piIn is Pi as it lives at a place: this machine's home, or a WSL
 // distro's (see wsl.go), its models.json naming the gateway as it reaches
 // it from there.

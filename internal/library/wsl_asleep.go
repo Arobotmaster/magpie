@@ -225,7 +225,7 @@ func Woken() (*Result, error) {
 	if !started {
 		return nil, nil
 	}
-	return Sync()
+	return SyncAgents()
 }
 
 // keepWoken is Woken for KeepLinked's loop, which logs what it couldn't do.

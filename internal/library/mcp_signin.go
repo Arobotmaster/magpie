@@ -21,13 +21,13 @@ import (
 // given as it is, and the agent signs in itself as before.
 
 func init() {
-	mcpauth.Changed = func(string) { _, _ = Sync() }
+	mcpauth.Changed = func(string) { _, _ = SyncAgents() }
 	// an agent beyond loopback is given a relayed server, or the MCP hub,
 	// with the LAN key (through, hubServerFor), which is the one there is
 	// no longer
 	access.LANChanged = func() {
 		if relaysAny() || (theHub{}).On() {
-			_, _ = Sync()
+			_, _ = SyncAgents()
 		}
 	}
 }

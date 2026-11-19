@@ -72,6 +72,7 @@ func (l *Library) syncProjectSubagents(p *Project, fail func(what string, err er
 	type want struct {
 		s  *Subagent
 		sp *subagentSpec
+		id string
 	}
 	wanted := map[string]want{} // file (project-relative) → what goes there
 	for _, name := range slices.Sorted(func(yield func(string) bool) {
@@ -87,7 +88,7 @@ func (l *Library) syncProjectSubagents(p *Project, fail func(what string, err er
 		}
 		for _, id := range p.Subagents[name] {
 			if sp := projectSubagentSpec(p, id); sp != nil {
-				wanted[p.rel(sp.path(s.Name))] = want{s, sp}
+				wanted[p.rel(sp.path(s.Name))] = want{s, sp, id}
 			}
 		}
 	}
@@ -95,13 +96,14 @@ func (l *Library) syncProjectSubagents(p *Project, fail func(what string, err er
 	done := map[string]bool{}
 	for _, f := range p.AgentFiles {
 		abs := filepath.Join(p.Dir, filepath.FromSlash(f.Path))
-		if err := p.inside(abs); err != nil {
+		dst, err := p.file(abs)
+		if err != nil {
 			fail("subagent:"+f.Name, err)
 			kept = append(kept, f)
 			done[f.Path] = true
 			continue
 		}
-		cur, err := os.ReadFile(abs)
+		cur, err := os.ReadFile(dst)
 		switch {
 		case os.IsNotExist(err):
 			continue // gone: written again below if it is still wanted
@@ -111,11 +113,13 @@ func (l *Library) syncProjectSubagents(p *Project, fail func(what string, err er
 			done[f.Path] = true
 			continue
 		case subagentHash(cur) != f.Hash:
-			continue // the user's from now on
+			fail("subagent:"+f.Name, fmt.Errorf("%s changed outside magpie", f.Path))
+			done[f.Path] = true
+			continue
 		}
 		w, ok := wanted[f.Path]
 		if !ok {
-			if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
+			if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
 				fail("subagent:"+f.Name, err)
 				kept = append(kept, f)
 			}
@@ -124,7 +128,7 @@ func (l *Library) syncProjectSubagents(p *Project, fail func(what string, err er
 		done[f.Path] = true
 		body := l.renderSubagent(w.sp, w.s)
 		if !bytes.Equal(cur, body) {
-			if err := edit.WriteAtomic(abs, body); err != nil {
+			if err := edit.WriteAtomic(dst, body); err != nil {
 				fail("subagent:"+f.Name, err)
 				kept = append(kept, f)
 				continue
@@ -144,30 +148,34 @@ func (l *Library) syncProjectSubagents(p *Project, fail func(what string, err er
 		}
 		w := wanted[rel]
 		abs := filepath.Join(p.Dir, filepath.FromSlash(rel))
-		if err := p.inside(abs); err != nil {
+		dst, err := p.file(abs)
+		if err != nil {
+			fail("subagent:"+w.s.Name, err)
+			continue
+		}
+		_, err = os.Lstat(dst)
+		if slices.ContainsFunc(p.nativeSubagents(w.id), func(r ProjectResource) bool {
+			return strings.EqualFold(r.Name, w.s.Name) || r.Path == rel
+		}) {
+			fail("subagent:"+w.s.Name, fmt.Errorf("%w %s (%s)", errProjectAlreadyHas, w.s.Name, w.id))
+			continue
+		}
+		if err == nil {
+			fail("subagent:"+w.s.Name, fmt.Errorf("%s is in the project already and isn't magpie's: it's left as it is", rel))
+			continue
+		}
+		if !os.IsNotExist(err) {
+			fail("subagent:"+w.s.Name, err)
+			continue
+		}
+		if err := p.mkdirs(filepath.Dir(abs)); err != nil {
 			fail("subagent:"+w.s.Name, err)
 			continue
 		}
 		body := l.renderSubagent(w.sp, w.s)
-		cur, err := os.ReadFile(abs)
-		switch {
-		case err == nil && bytes.Equal(cur, body):
-			// the same as magpie would write: taken as magpie's
-		case err == nil:
-			fail("subagent:"+w.s.Name, fmt.Errorf("%s is in the project already and isn't magpie's: it's left as it is", rel))
-			continue
-		case !os.IsNotExist(err):
+		if err := edit.WriteAtomic(dst, body); err != nil {
 			fail("subagent:"+w.s.Name, err)
 			continue
-		default:
-			if err := p.mkdirs(filepath.Dir(abs)); err != nil {
-				fail("subagent:"+w.s.Name, err)
-				continue
-			}
-			if err := edit.WriteAtomic(abs, body); err != nil {
-				fail("subagent:"+w.s.Name, err)
-				continue
-			}
 		}
 		kept = append(kept, SubagentFile{Name: w.s.Name, Path: rel, Hash: subagentHash(body)})
 	}
@@ -177,8 +185,9 @@ func (l *Library) syncProjectSubagents(p *Project, fail func(what string, err er
 
 // ProjectSubagents sets which agents get each of some library subagents
 // in a project; none takes them out of it.
-func ProjectSubagents(dir string, names, agents []string) (*Result, error) {
-	return change(func(l *Library) error {
+func ProjectSubagents(dir string, names, agents []string, options ...ProjectWriteOptions) (*Result, error) {
+	var skipped []Problem
+	res, err := changeProject(dir, projectRoles, func(l *Library) error {
 		p := l.project(dir)
 		if p == nil {
 			return fmt.Errorf("no project %s", dir)
@@ -199,17 +208,31 @@ func ProjectSubagents(dir string, names, agents []string) (*Result, error) {
 			ids = set(ids, id, true)
 		}
 		for _, n := range names {
-			if len(ids) == 0 {
+			keep := slices.DeleteFunc(slices.Clone(ids), func(id string) bool {
+				sp := projectSubagentSpec(p, id)
+				if sp == nil {
+					return false
+				}
+				if slices.ContainsFunc(p.nativeSubagents(id), func(r ProjectResource) bool {
+					return strings.EqualFold(r.Name, n) || r.Path == p.rel(sp.path(n))
+				}) {
+					skipped = append(skipped, projectSkip(p, "subagent:"+n, n, id))
+					return true
+				}
+				return false
+			})
+			if len(keep) == 0 {
 				delete(p.Subagents, n)
 				continue
 			}
 			if p.Subagents == nil {
 				p.Subagents = map[string][]string{}
 			}
-			p.Subagents[n] = slices.Clone(ids)
+			p.Subagents[n] = keep
 		}
 		return nil
-	})
+	}, options...)
+	return withProjectSkips(res, skipped), err
 }
 
 // renameProjectSubagents has the projects give a subagent its new name.

@@ -6,6 +6,7 @@
 package library
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -16,11 +17,13 @@ import (
 
 	"github.com/yetone/magpie/internal/capre"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/settings"
 )
 
 // Library is library.json: what magpie keeps, and which agents get it.
 type Library struct {
+	source       []byte       // library.json as read, for detecting concurrent changes
 	Instructions Instructions `json:"instructions"`
 	MCP          []*Server    `json:"mcp"`
 	Skills       []*Skill     `json:"skills"`
@@ -226,6 +229,7 @@ func load() (*Library, error) {
 	if err != nil {
 		return nil, err
 	}
+	l.source = b
 	if len(b) > 0 {
 		if err := json.Unmarshal(b, l); err != nil {
 			return nil, fmt.Errorf("%s: %w", path(), err)
@@ -240,7 +244,39 @@ func load() (*Library, error) {
 	return l, nil
 }
 
+func lockLibraryWrites() (func(), error) {
+	unlock, held := filelock.Lock(path()+".lock", filelock.Wait)
+	if !held {
+		return nil, fmt.Errorf("could not lock the library for writing")
+	}
+	return unlock, nil
+}
+
 func (l *Library) save() error {
+	unlock, err := lockLibraryWrites()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	cur, err := edit.Read(path())
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(cur, l.source) {
+		return fmt.Errorf("%s changed during the library operation", path())
+	}
+	b, err := l.encoded()
+	if err != nil {
+		return err
+	}
+	if err := edit.WriteAtomic(path(), b); err != nil {
+		return err
+	}
+	l.source = b
+	return nil
+}
+
+func (l *Library) encoded() ([]byte, error) {
 	sort.Slice(l.MCP, func(i, j int) bool { return l.MCP[i].Name < l.MCP[j].Name })
 	// a paused server given an agent, however, is on again
 	for _, s := range l.MCP {
@@ -294,9 +330,9 @@ func (l *Library) save() error {
 	l.Instructions.Agents = orNone(l.Instructions.Agents)
 	b, err := json.MarshalIndent(l, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return edit.WriteAtomic(path(), append(b, '\n'))
+	return append(b, '\n'), nil
 }
 
 func (l *Library) applied(agent string) *Applied {

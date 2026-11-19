@@ -78,6 +78,7 @@ func TestProjectSubagentsEachAgentsFolder(t *testing.T) {
 	s.Prompt = "You review harder."
 	s.Agents = []string{}
 	ok(t)(SaveSubagent("reviewer", s))
+	ok(t)(ProjectApply(a))
 	if !strings.Contains(read(t, filepath.Join(a, ".claude/agents/reviewer.md")), "harder") {
 		t.Error("an edit of the subagent didn't reach the project")
 	}
@@ -91,7 +92,7 @@ func TestProjectSubagentsEachAgentsFolder(t *testing.T) {
 	}
 	// none: everything magpie made goes, folders and exclude lines too
 	ok(t)(ProjectSubagents(a, []string{"reviewer"}, nil))
-	for _, d := range []string{".claude", ".github", ".codex"} {
+	for _, d := range []string{".claude", ".github", ".codex", ".pi"} {
 		if _, err := os.Stat(filepath.Join(a, d)); err == nil {
 			t.Errorf("%s was left", d)
 		}
@@ -115,15 +116,18 @@ func TestProjectSubagentsLeaveTheUsersFiles(t *testing.T) {
 		t.Fatal("the user's file was written over")
 	}
 	found := false
-	for _, p := range res.Problems {
+	for _, p := range res.Skipped {
 		found = found || p.What == "project:subagent:reviewer"
 	}
 	if !found {
-		t.Errorf("no problem for the user's file: %+v", res.Problems)
+		t.Errorf("no skip for the user's file: %+v", res.Skipped)
 	}
 	gem := filepath.Join(a, ".gemini/agents/reviewer.md")
 	write(t, gem, read(t, gem)+"\nmy edit\n")
-	ok(t)(ProjectSubagents(a, []string{"reviewer"}, nil))
+	r, err := ProjectSubagents(a, []string{"reviewer"}, nil)
+	if err != nil || !problemAbout(r, "project:subagent:reviewer") {
+		t.Fatalf("changed role: %+v %v", r, err)
+	}
 	if !strings.Contains(read(t, gem), "my edit") {
 		t.Error("an edited file was taken away")
 	}
@@ -144,6 +148,7 @@ func TestProjectSubagentsFollowTheLibrary(t *testing.T) {
 	s := reviewer
 	s.Name, s.Agents = "checker", []string{}
 	ok(t)(SaveSubagent("reviewer", s))
+	ok(t)(ProjectApply(a))
 	if _, err := os.Stat(filepath.Join(a, ".claude/agents/reviewer.md")); err == nil {
 		t.Error("the old name stayed")
 	}
@@ -151,6 +156,7 @@ func TestProjectSubagentsFollowTheLibrary(t *testing.T) {
 		t.Error("the renamed subagent didn't follow")
 	}
 	ok(t)(RemoveSubagents([]string{"checker"}))
+	ok(t)(ProjectApply(a))
 	if _, err := os.Stat(filepath.Join(a, ".claude")); err == nil {
 		t.Error("removing the subagent left its file or folder")
 	}
@@ -169,13 +175,9 @@ func TestProjectSubagentsFollowWorktrees(t *testing.T) {
 	_, a, _ := subagentProjects(t)
 	ok(t)(ProjectSubagents(a, []string{"reviewer"}, []string{"claude"}))
 
-	// git worktree add ../a-wt
 	wt := filepath.Join(filepath.Dir(a), "a-wt")
-	own := filepath.Join(a, ".git", "worktrees", "a-wt")
-	write(t, filepath.Join(wt, ".git"), "gitdir: "+own+"\n")
-	write(t, filepath.Join(own, "gitdir"), filepath.Join(wt, ".git")+"\n")
-	write(t, filepath.Join(own, "commondir"), "../..\n")
-	keepProjectTrees()
+	projectWorktree(t, a, wt)
+	ok(t)(ProjectDistribute(a, ProjectDistribution{Subagents: true}))
 	f := filepath.Join(wt, ".claude", "agents", "reviewer.md")
 	if !strings.Contains(read(t, f), "You review code.") {
 		t.Fatal("the worktree hasn't the project's subagent")

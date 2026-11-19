@@ -98,6 +98,10 @@ func TestProjectServers(t *testing.T) {
 
 	// a server renamed is renamed in the project
 	ok(t)(SaveServer("docs", Server{Name: "manual", Transport: "http", URL: "https://docs.example/mcp"}))
+	if s := servers(t, mcp, "mcpServers"); s["docs"] == nil || s["manual"] != nil {
+		t.Fatalf("editing the library wrote project files: %v", s)
+	}
+	ok(t)(ProjectApply(proj))
 	if s := servers(t, mcp, "mcpServers"); s["docs"] != nil || s["manual"] == nil {
 		t.Errorf("after rename: %v", s)
 	}
@@ -181,6 +185,7 @@ func TestProjectServerChecks(t *testing.T) {
 	gone(t, filepath.Join(proj, ".codex"))
 	// a server taken out of the library goes from the project too
 	ok(t)(RemoveServer("events"))
+	ok(t)(ProjectApply(proj))
 	if s := servers(t, filepath.Join(proj, ".mcp.json"), "mcpServers"); s["events"] != nil {
 		t.Errorf(".mcp.json: %v", s)
 	}

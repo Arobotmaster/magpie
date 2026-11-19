@@ -3,13 +3,18 @@ package library
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/proc"
 )
 
 // A project in a git repository keeps what magpie places in it out of git
@@ -122,7 +127,7 @@ func (p *Project) treeDirs() []string {
 	if !ok {
 		return nil
 	}
-	rel, err := filepath.Rel(g.Top, p.Dir)
+	rel, err := filepath.Rel(realDir(g.Top), realDir(p.Dir))
 	if err != nil {
 		return nil
 	}
@@ -132,6 +137,11 @@ func (p *Project) treeDirs() []string {
 			continue
 		}
 		d := filepath.Join(top, rel)
+		other, err := projectRepository(realDir(d))
+		if err != nil || other.Top == "" || realDir(other.Common) != realDir(g.Common) || realDir(other.Top) != realDir(top) ||
+			realDir(d) != filepath.Join(realDir(top), rel) {
+			continue
+		}
 		if fi, err := os.Stat(d); err == nil && fi.IsDir() {
 			out = append(out, d)
 		}
@@ -157,12 +167,21 @@ func excludeBegin(dir string) string {
 // magpie placed in the project, relative to its worktree's top, between
 // the project's two lines; every other line is git's or the user's.
 func (p *Project) writeExclude(g gitWhere, entries []string) error {
-	f := filepath.Join(g.Common, "info", "exclude")
+	f := filepath.Join(realBelow(filepath.Dir(g.Common)), filepath.Base(g.Common), "info", "exclude")
+	if p.writes != nil {
+		// The worktree's .git entry names where Git itself reads this
+		// metadata. Treat a link inside that directory as foreign.
+		var err error
+		f, err = p.writes.localFile(f)
+		if err != nil {
+			return err
+		}
+	}
 	b, err := os.ReadFile(f)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	rel, err := filepath.Rel(g.Top, p.Dir)
+	rel, err := filepath.Rel(realDir(g.Top), realDir(p.Dir))
 	if err != nil {
 		return err
 	}
@@ -175,18 +194,26 @@ func (p *Project) writeExclude(g gitWhere, entries []string) error {
 		nl = "\r\n"
 	}
 	begin := excludeBegin(p.Dir)
-	rest := stripBlock(strings.ReplaceAll(string(b), "\r\n", "\n"), begin)
+	original := strings.ReplaceAll(string(b), "\r\n", "\n")
+	rest := stripBlock(original, begin)
 	out := rest
 	if len(entries) > 0 {
 		sort.Strings(entries)
+		var block strings.Builder
+		block.WriteString(begin + "\n")
+		for _, e := range slices.Compact(entries) {
+			block.WriteString(pre + e + "\n")
+		}
+		block.WriteString(ignoreEnd + "\n")
+		if strings.Contains(original, block.String()) {
+			return nil
+		}
 		if out != "" {
 			out += "\n"
 		}
-		out += begin + "\n"
-		for _, e := range slices.Compact(entries) {
-			out += pre + e + "\n"
-		}
-		out += ignoreEnd + "\n"
+		out += block.String()
+	} else if !strings.Contains(original, begin+"\n") {
+		return nil
 	}
 	out = strings.ReplaceAll(out, "\n", nl)
 	if out == string(b) {
@@ -218,4 +245,166 @@ func stripBlock(s, begin string) string {
 		r += "\n"
 	}
 	return r
+}
+
+// projectGit combines the index and HEAD, so staged and unstaged deletions
+// both stay deleted. Directories are included by checking path prefixes.
+type projectGit struct {
+	where   gitWhere
+	tracked map[string]string
+	folders map[string]bool
+	err     error
+}
+
+func (w *projectWrites) repository(root string) *projectGit {
+	if g := w.git[root]; g != nil {
+		return g
+	}
+	g := &projectGit{}
+	w.git[root] = g
+	g.where, g.err = projectRepository(root)
+	if g.err != nil || g.where.Top == "" {
+		return g
+	}
+	run := func(args ...string) ([]byte, error) {
+		cmd := proc.Command("git", append([]string{"--no-optional-locks", "-C", root}, args...)...)
+		// The caller may itself be a Git hook with repository overrides.
+		cmd.Env = slices.DeleteFunc(os.Environ(), func(v string) bool { return strings.HasPrefix(v, "GIT_") })
+		return cmd.Output()
+	}
+	index, err := run("ls-files", "-z", "--full-name", "--", ":/")
+	if err != nil {
+		g.err = fmt.Errorf("%s: cannot read the Git index: %w", root, err)
+		return g
+	}
+	entries := strings.Split(string(index), "\x00")
+	head, err := run("rev-parse", "--verify", "--quiet", "HEAD")
+	if err == nil {
+		committed, err := run("ls-tree", "-rz", "--name-only", strings.TrimSpace(string(head)))
+		if err != nil {
+			g.err = fmt.Errorf("%s: cannot read Git HEAD: %w", root, err)
+			return g
+		}
+		entries = append(entries, strings.Split(string(committed), "\x00")...)
+	} else if e, ok := err.(*exec.ExitError); !ok || e.ExitCode() != 1 {
+		g.err = fmt.Errorf("%s: cannot resolve Git HEAD: %w", root, err)
+	}
+	g.tracked, g.folders = map[string]string{}, map[string]bool{}
+	for _, entry := range entries {
+		if entry == "" {
+			continue
+		}
+		key := strings.ToLower(entry)
+		g.tracked[key] = entry
+		for top := filepath.Dir(key); top != "."; top = filepath.Dir(top) {
+			g.folders[filepath.ToSlash(top)] = true
+		}
+	}
+	return g
+}
+
+// projectRepository confirms the nearest Git administrative entry
+// belongs to the selected root. A Git worktree's record points back to
+// its own .git file, so a hand-edited gitfile can't claim a different repo.
+func projectRepository(root string) (gitWhere, error) {
+	for dir := root; ; dir = filepath.Dir(dir) {
+		admin := filepath.Join(dir, ".git")
+		fi, err := os.Lstat(admin)
+		if err == nil {
+			g, ok := gitOf(root)
+			if !ok || g.Top != dir || linkEntry(fi) {
+				return gitWhere{}, fmt.Errorf("%s: Git repository boundary is unclear", admin)
+			}
+			if fi.IsDir() {
+				return g, nil
+			}
+			own, ok := gitdirOf(admin)
+			back, err := os.ReadFile(filepath.Join(own, "gitdir"))
+			dst := strings.TrimSpace(string(back))
+			if !filepath.IsAbs(dst) {
+				dst = filepath.Join(own, dst)
+			}
+			if !ok || err != nil || realBelow(dst) != admin ||
+				filepath.Dir(realDir(own)) != filepath.Join(realDir(g.Common), "worktrees") {
+				return gitWhere{}, fmt.Errorf("%s: Git worktree binding could not be verified", admin)
+			}
+			return g, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return gitWhere{}, err
+		}
+		if dir == filepath.Dir(dir) {
+			return gitWhere{}, nil
+		}
+	}
+}
+
+func (p *Project) writePath(abs string, skill bool) (string, error) {
+	root := realDir(p.Dir)
+	if !filepath.IsAbs(root) || abs == p.Dir || !within(abs, p.Dir) {
+		return "", fmt.Errorf("%s is outside the project", abs)
+	}
+	anchor := abs
+	if skill {
+		anchor = filepath.Dir(abs) // magpie's own skill link is an entry
+	}
+	if err := p.inside(anchor); err != nil {
+		return "", err
+	}
+	real := realBelow(anchor)
+	if skill {
+		real = filepath.Join(real, filepath.Base(abs))
+	}
+	g := p.writes.repository(root)
+	if g.err != nil {
+		return "", g.err
+	}
+	// Reject nested repositories (including gitfiles and submodules) and
+	// their administration paths on both the typed and resolved routes.
+	for _, target := range []string{abs, real} {
+		base := p.Dir
+		if target == real {
+			base = root
+		}
+		for at := target; at != base; at = filepath.Dir(at) {
+			if !within(at, base) || strings.EqualFold(filepath.Base(at), ".git") {
+				return "", fmt.Errorf("%s crosses a Git repository boundary", abs)
+			}
+			if _, err := os.Lstat(filepath.Join(at, ".git")); err == nil {
+				return "", fmt.Errorf("%s crosses a Git repository boundary", abs)
+			} else if !errors.Is(err, fs.ErrNotExist) {
+				// A regular file and an owned skill link cannot contain .git.
+				if fi, statErr := os.Lstat(at); statErr != nil || fi.IsDir() {
+					return "", err
+				}
+			}
+		}
+	}
+	if g.where.Top != "" {
+		for _, target := range []string{filepath.Join(root, filepath.FromSlash(p.rel(abs))), real} {
+			rel, err := filepath.Rel(g.where.Top, target)
+			if err != nil {
+				return "", err
+			}
+			rel = strings.ToLower(filepath.ToSlash(rel))
+			for top := filepath.Dir(rel); top != "." && top != filepath.Dir(top); top = filepath.Dir(top) {
+				if tracked := g.tracked[filepath.ToSlash(top)]; tracked != "" {
+					return "", fmt.Errorf("%s is beneath Git-tracked path %s", abs, tracked)
+				}
+			}
+			if g.tracked[rel] == "" && !g.folders[rel] {
+				continue
+			}
+			fi, err := os.Lstat(target)
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				return "", fmt.Errorf("%s is a deleted Git-tracked path", target)
+			case err != nil:
+				return "", err
+			case skill || fi.IsDir():
+				return "", fmt.Errorf("%s contains Git-tracked content", target)
+			}
+		}
+	}
+	return real, nil
 }

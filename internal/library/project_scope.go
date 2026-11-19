@@ -3,7 +3,6 @@ package library
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -182,12 +181,22 @@ func (l *Library) syncClaudeLocal(p *Project, hub *Server, fail func(what string
 		}
 		return
 	}
-	release, err := claudelock.Config(path)
+	var err error
+	if p.writes != nil {
+		// Claude keeps this project's own MCP stanza in a shared local file.
+		// Stage only this project's stanza; the rest is retained byte-for-byte.
+		path, err = p.writes.localFile(filepath.Join(realBelow(filepath.Dir(path)), filepath.Base(path)))
+	} else {
+		var release func()
+		release, err = claudelock.Config(path)
+		if err == nil {
+			defer release()
+		}
+	}
 	if err != nil {
 		fail("claude", err)
 		return
 	}
-	defer release()
 	// a record under another key (the folder became a repository's) goes
 	if p.Claude != nil && p.Claude.Root != root {
 		if err := clearClaudeLocal(path, p.Claude); err != nil {
@@ -324,7 +333,8 @@ func (l *Library) syncCodexOff(p *Project, fail func(what string, err error)) {
 	}
 	want = slices.DeleteFunc(want, func(n string) bool { return have[n] == nil })
 	abs := filepath.Join(p.Dir, filepath.FromSlash(codexOffRel))
-	if err := p.inside(abs); err != nil {
+	dst, err := p.file(abs)
+	if err != nil {
 		fail("mcp", err)
 		return
 	}
@@ -333,13 +343,13 @@ func (l *Library) syncCodexOff(p *Project, fail func(what string, err error)) {
 		if slices.Contains(want, name) {
 			continue
 		}
-		if err := edit.DelTOMLKey(abs, "mcp_servers."+name, "enabled"); err != nil {
+		if err := edit.DelTOMLKey(dst, "mcp_servers."+name, "enabled"); err != nil {
 			fail("mcp:"+name, err)
 			mine = append(mine, name)
 		}
 	}
 	for _, name := range want {
-		if !exists(abs) {
+		if !exists(dst) {
 			if err := p.mkdirs(filepath.Dir(abs)); err != nil {
 				fail("mcp:"+name, err)
 				continue
@@ -348,7 +358,7 @@ func (l *Library) syncCodexOff(p *Project, fail func(what string, err error)) {
 				p.MadeFiles = append(p.MadeFiles, codexOffRel)
 			}
 		}
-		if err := edit.SetTOMLKey(abs, "mcp_servers."+name, "enabled", false); err != nil {
+		if err := edit.SetTOMLKey(dst, "mcp_servers."+name, "enabled", false); err != nil {
 			fail("mcp:"+name, err)
 			continue
 		}
@@ -371,7 +381,8 @@ func (l *Library) syncSkillsOff(p *Project, fail func(what string, err error)) {
 		return
 	}
 	abs := filepath.Join(p.Dir, filepath.FromSlash(claudeSettingsRel))
-	if err := p.inside(abs); err != nil {
+	dst, err := p.file(abs)
+	if err != nil {
 		fail("skills", err)
 		return
 	}
@@ -381,23 +392,23 @@ func (l *Library) syncSkillsOff(p *Project, fail func(what string, err error)) {
 			continue
 		}
 		k, _ := jsonKey(name)
-		if v, ok := edit.GetJSON(abs, "skillOverrides."+k); ok && v != "off" {
+		if v, ok := edit.GetJSON(dst, "skillOverrides."+k); ok && v != "off" {
 			continue // the user's own by now
 		}
-		if err := edit.DelJSON(abs, "skillOverrides."+k); err != nil {
+		if err := edit.DelJSON(dst, "skillOverrides."+k); err != nil {
 			fail(name, err)
 			mine = append(mine, name)
 		}
 	}
 	for _, name := range want {
 		k, _ := jsonKey(name)
-		if v, ok := edit.GetJSON(abs, "skillOverrides."+k); ok && !slices.Contains(p.Overrides, name) {
+		if v, ok := edit.GetJSON(dst, "skillOverrides."+k); ok && !slices.Contains(p.Overrides, name) {
 			if v != "off" {
 				fail(name, fmt.Errorf("%s sets %s for this project already: it's left as it is", claudeSettingsRel, name))
 			}
 			continue
 		}
-		if !exists(abs) {
+		if !exists(dst) {
 			if err := p.mkdirs(filepath.Dir(abs)); err != nil {
 				fail(name, err)
 				continue
@@ -406,7 +417,7 @@ func (l *Library) syncSkillsOff(p *Project, fail func(what string, err error)) {
 				p.MadeFiles = append(p.MadeFiles, claudeSettingsRel)
 			}
 		}
-		if err := edit.SetJSON(abs, edit.KV{Path: "skillOverrides." + k, Value: "off"}); err != nil {
+		if err := edit.SetJSON(dst, edit.KV{Path: "skillOverrides." + k, Value: "off"}); err != nil {
 			fail(name, err)
 			continue
 		}
@@ -427,15 +438,16 @@ func (p *Project) dropMadeFile(rel string) {
 		return
 	}
 	abs := filepath.Join(p.Dir, filepath.FromSlash(rel))
-	if p.inside(abs) != nil {
+	dst, err := p.file(abs)
+	if err != nil {
 		return
 	}
 	format := fmtClaude
 	if strings.HasSuffix(rel, ".toml") {
 		format = fmtCodex
 	}
-	if blankFile(abs, format) {
-		if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
+	if blankFile(dst, format) {
+		if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
 			return
 		}
 	}
@@ -444,51 +456,68 @@ func (p *Project) dropMadeFile(rel string) {
 
 // ---- worktrees -------------------------------------------------------------
 
-// syncTrees gives the project's folder in each other worktree of its
-// repository the project's set, as its own project magpie keeps records
-// of (Project.Trees), and takes it back out of a folder that is no longer
-// one of them. A worktree gone from disk takes its records with it:
-// nothing of magpie's is left there to take back. Claude Code keeps a
-// worktree's project under the main worktree's record (claudeRoot), so
-// that one serves them all.
-func (l *Library) syncTrees(p *Project, res *Result, hubs map[string]*Server) {
+// syncTrees applies only opted-in categories to the same project folder
+// in registered worktrees. Turning a category off stops future writes.
+func (l *Library) syncTrees(p *Project, res *Result, parts projectParts) {
+	copyParts := projectParts(0)
+	if p.Distribution.Skills {
+		copyParts |= projectSkills
+	}
+	if p.Distribution.Subagents {
+		copyParts |= projectRoles
+	}
+	if p.Distribution.Instructions {
+		copyParts |= projectInstructions
+	}
+	copyParts &= parts
+	if copyParts == 0 && parts&projectLegacyCopies == 0 {
+		return
+	}
 	dirs := p.treeDirs()
-	var trees []*Project
+	p.Trees = slices.DeleteFunc(p.Trees, func(t *Project) bool {
+		// Keep the record for a temporarily inaccessible worktree.
+		_, err := os.Lstat(t.Dir)
+		return os.IsNotExist(err) && !slices.Contains(dirs, t.Dir)
+	})
 	for _, d := range dirs {
+		if slices.ContainsFunc(l.Projects, func(other *Project) bool { return realDir(other.Dir) == realDir(d) }) {
+			continue // separately registered projects own their assignments
+		}
 		t := p.tree(d)
 		if t == nil {
+			if copyParts == 0 {
+				continue
+			}
 			t = &Project{Dir: d}
+			p.Trees = append(p.Trees, t)
 		}
-		t.Copy, t.Skills, t.Servers, t.ServersOff, t.SkillsOff, t.Subagents = p.Copy, p.Skills, p.Servers, p.ServersOff, p.SkillsOff, p.Subagents
-		t.Instr, t.InstrAgents = p.Instr, p.InstrAgents
-		l.syncFolder(t, res, hubs)
-		trees = append(trees, t)
+		t.writes = p.writes
+		if copyParts&projectSkills != 0 {
+			t.Copy, t.Skills, t.SkillsOff = p.Copy, p.Skills, p.SkillsOff
+		}
+		if copyParts&projectRoles != 0 {
+			t.Subagents = p.Subagents
+		}
+		if copyParts&projectInstructions != 0 {
+			t.Instr, t.InstrAgents = p.Instr, p.InstrAgents
+		}
+		treeParts := copyParts
+		if parts&projectLegacyCopies != 0 && (len(t.Wrote) > 0 || len(t.CodexOff) > 0) {
+			// One explicit full sync takes back recorded MCP entries from
+			// the old automatic distribution. It never creates new ones.
+			t.Servers, t.ServersOff = nil, nil
+			treeParts |= projectServers
+		}
+		if treeParts != 0 {
+			l.syncFolder(t, res, nil, treeParts)
+			t.planTidy()
+		}
 	}
-	for _, t := range p.Trees {
-		if slices.ContainsFunc(trees, func(x *Project) bool { return x.Dir == t.Dir }) {
-			continue
-		}
-		if fi, err := os.Stat(t.Dir); err != nil || !fi.IsDir() {
-			continue
-		}
-		// no longer one of the repository's worktrees, or no longer the
-		// project's: what magpie put there comes out
-		t.Skills, t.Servers, t.ServersOff, t.SkillsOff, t.Subagents = nil, nil, nil, nil, nil
-		t.Instr, t.InstrAgents = "", nil
-		l.syncFolder(t, res, nil)
-		if t.holds() {
-			trees = append(trees, t)
-		}
-	}
-	for _, t := range trees {
-		t.Trees, t.Claude = nil, nil
-	}
-	p.Trees = trees
 }
 
 func (p *Project) tree(dir string) *Project {
 	for _, t := range p.Trees {
-		if t.Dir == dir {
+		if t.Dir == dir || realDir(t.Dir) == realDir(dir) {
 			return t
 		}
 	}
@@ -497,13 +526,20 @@ func (p *Project) tree(dir string) *Project {
 
 // holds says whether magpie has anything of its own in the folder still.
 func (p *Project) holds() bool {
-	return len(p.Placed) > 0 || len(p.Wrote) > 0 || len(p.CodexOff) > 0 || len(p.Overrides) > 0 || len(p.MadeFiles) > 0 || len(p.AgentFiles) > 0 || len(p.InstrFiles) > 0
+	return len(p.Placed) > 0 || len(p.SkillLinks) > 0 || len(p.Wrote) > 0 || len(p.CodexOff) > 0 || len(p.Overrides) > 0 || len(p.MadeFiles) > 0 || len(p.AgentFiles) > 0 || len(p.HookFiles) > 0 || len(p.Pi) > 0 || len(p.PiEntries) > 0 || len(p.ClaudePlugins) > 0 || len(p.InstrFiles) > 0
 }
 
 // ignored are the files and folders of the project magpie put there, which
-// are kept out of git.
+// are kept out of git. A project's hooks files (.claude/settings.local.json,
+// .codex/hooks.json) are not among them: they are the project's own
+// configuration, hold the user's own entries beside magpie's, and are left
+// to the project's .gitignore exactly as the servers written in .mcp.json
+// are (project_hooks.go).
 func (p *Project) ignored() []string {
 	out := slices.Concat(p.Placed, p.MadeFiles)
+	for path := range p.SkillLinks {
+		out = append(out, path)
+	}
 	for _, f := range p.AgentFiles {
 		out = append(out, f.Path)
 	}
@@ -517,58 +553,12 @@ func (p *Project) ignored() []string {
 	return out
 }
 
-// treesChanged says whether a project's repository has a worktree its
-// records don't, or lost one: the library is synced again then
-// (keepProjectTrees), for a worktree made with git to follow its project.
-func (l *Library) treesChanged() bool {
-	for _, p := range l.Projects {
-		// a folder made a repository since (git init): its entries go
-		// into the new info/exclude
-		if len(p.ignored()) > 0 {
-			if g, ok := gitOf(p.Dir); ok {
-				b, _ := os.ReadFile(filepath.Join(g.Common, "info", "exclude"))
-				if !strings.Contains(string(b), excludeBegin(p.Dir)) {
-					return true
-				}
-			}
-		}
-		if len(p.Skills)+len(p.Servers)+len(p.ServersOff)+len(p.SkillsOff)+len(p.Subagents)+len(p.InstrAgents) == 0 && len(p.Trees) == 0 {
-			continue
-		}
-		dirs := p.treeDirs()
-		if len(dirs) != len(p.Trees) {
-			return true
-		}
-		for _, d := range dirs {
-			if p.tree(d) == nil {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// keepProjectTrees syncs the library again when a project's repository
-// has a new worktree, or lost one, or the project's folder became a
-// repository.
-func keepProjectTrees() {
-	mu.Lock()
-	l, err := load()
-	mu.Unlock()
-	if err != nil || !l.treesChanged() {
-		return
-	}
-	if _, err := change(func(*Library) error { return nil }); err != nil {
-		log.Println("library: a project's worktrees:", err)
-	}
-}
-
 // ---- changing -------------------------------------------------------------
 
 // ProjectServerOff sets which agents have a global server turned off in a
 // project; none gives it back to the project as the global set has it.
-func ProjectServerOff(dir, name string, agents []string) (*Result, error) {
-	return change(func(l *Library) error {
+func ProjectServerOff(dir, name string, agents []string, options ...ProjectWriteOptions) (*Result, error) {
+	return changeProject(dir, projectServers, func(l *Library) error {
 		p := l.project(dir)
 		if p == nil {
 			return fmt.Errorf("no project %s", dir)
@@ -592,13 +582,13 @@ func ProjectServerOff(dir, name string, agents []string) (*Result, error) {
 		}
 		p.ServersOff[name] = ids
 		return nil
-	})
+	}, options...)
 }
 
 // ProjectSkillsOff sets which agents have each of some global skills
 // turned off in a project; none gives them back.
-func ProjectSkillsOff(dir string, names, agents []string) (*Result, error) {
-	return change(func(l *Library) error {
+func ProjectSkillsOff(dir string, names, agents []string, options ...ProjectWriteOptions) (*Result, error) {
+	return changeProject(dir, projectSkills, func(l *Library) error {
 		p := l.project(dir)
 		if p == nil {
 			return fmt.Errorf("no project %s", dir)
@@ -629,5 +619,5 @@ func ProjectSkillsOff(dir string, names, agents []string) (*Result, error) {
 			p.SkillsOff[name] = slices.Clone(ids)
 		}
 		return nil
-	})
+	}, options...)
 }

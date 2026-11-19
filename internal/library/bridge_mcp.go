@@ -54,7 +54,7 @@ func init() {
 		if changed, err := adoptBridge(id); err != nil {
 			log.Printf("library: giving a Remote magpie's MCP router a server: %v", err)
 		} else if changed {
-			if _, err := Sync(); err != nil {
+			if _, err := SyncAgents(); err != nil {
 				log.Printf("library: syncing after a Remote magpie's MCP router: %v", err)
 			}
 		}

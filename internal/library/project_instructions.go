@@ -134,8 +134,8 @@ type InstrFile struct {
 
 // syncProjectInstr writes the project's instructions into the file of
 // each agent picked for them, and takes them out of a file no longer
-// wanted. A part the user edited in the file is left alone until the
-// project's text changes; one taken out of the file is written again.
+// wanted. Existing files need a matching ownership record, and editing
+// or removing the managed block relinquishes permission to change it.
 func (l *Library) syncProjectInstr(p *Project, fail func(what string, err error)) {
 	text := markersOut(strings.TrimSpace(strings.ReplaceAll(p.Instr, "\r\n", "\n")))
 	wanted := map[string]bool{}
@@ -160,12 +160,13 @@ func (l *Library) syncProjectInstr(p *Project, fail func(what string, err error)
 			continue
 		}
 		abs := filepath.Join(p.Dir, filepath.FromSlash(f.Path))
-		if err := p.inside(abs); err != nil {
+		dst, err := p.file(abs)
+		if err != nil {
 			fail("instructions", err)
 			kept = append(kept, f)
 			continue
 		}
-		raw, err := os.ReadFile(abs)
+		raw, err := os.ReadFile(dst)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -175,14 +176,15 @@ func (l *Library) syncProjectInstr(p *Project, fail func(what string, err error)
 			continue
 		}
 		file := string(raw)
-		if _, _, _, ok := split(file); !ok {
-			continue // the user took it out themselves
+		if _, have, _, ok := split(file); !ok || hash(have) != f.Hash {
+			fail("instructions", fmt.Errorf("%s changed outside magpie", f.Path))
+			continue
 		}
 		rest := own(strings.ReplaceAll(file, "\r\n", "\n"))
 		if rest == "" && f.Made {
-			err = os.Remove(abs)
+			err = os.Remove(dst)
 		} else {
-			err = edit.WriteAtomic(abs, []byte(withEnds(withBlock(file, ""), file)))
+			err = edit.WriteAtomic(dst, []byte(withEnds(withBlock(file, ""), file)))
 		}
 		if err != nil {
 			fail("instructions", err)
@@ -201,7 +203,8 @@ func (l *Library) syncProjectInstr(p *Project, fail func(what string, err error)
 		if globals == nil {
 			globals = l.globalInstrFiles()
 		}
-		if err := p.inside(abs); err != nil {
+		dst, err := p.file(abs)
+		if err != nil {
 			fail("instructions", err)
 			if had {
 				kept = append(kept, r)
@@ -215,7 +218,7 @@ func (l *Library) syncProjectInstr(p *Project, fail func(what string, err error)
 			}
 			continue
 		}
-		raw, err := os.ReadFile(abs)
+		raw, err := os.ReadFile(dst)
 		made := r.Made
 		switch {
 		case errors.Is(err, os.ErrNotExist):
@@ -228,14 +231,22 @@ func (l *Library) syncProjectInstr(p *Project, fail func(what string, err error)
 			continue
 		}
 		file := string(raw)
+		if made && own(strings.ReplaceAll(file, "\r\n", "\n")) != "" {
+			made = false // existing user text owns the file, though we own a block
+			r.Made = false
+		}
 		_, have, _, ok := split(file)
-		switch {
-		case ok && have == text:
-			kept = append(kept, InstrFile{Path: rel, Hash: hash(text), Made: made})
+		if err == nil && (!had || !ok || hash(have) != r.Hash) {
+			if !ok || have != text {
+				fail("instructions", fmt.Errorf("%s isn't an unchanged magpie instructions block", rel))
+			}
+			// A matching block without a record still belongs to the user.
+			if had {
+				kept = append(kept, r)
+			}
 			continue
-		case ok && had && hash(have) != r.Hash && hash(text) == r.Hash:
-			// edited in the file since, and the project's text hasn't
-			// changed: the user's edit stays until it does
+		}
+		if ok && have == text {
 			kept = append(kept, r)
 			continue
 		}
@@ -245,7 +256,7 @@ func (l *Library) syncProjectInstr(p *Project, fail func(what string, err error)
 				continue
 			}
 		}
-		if err := edit.WriteAtomic(abs, []byte(withEnds(withBlock(file, text), file))); err != nil {
+		if err := edit.WriteAtomic(dst, []byte(withEnds(withBlock(file, text), file))); err != nil {
 			fail("instructions", err)
 			if had {
 				kept = append(kept, r)
@@ -292,8 +303,8 @@ type ProjectInstr struct {
 // ProjectInstructions sets a project's own instructions, and the agents
 // whose project file they are written into; no agents, or no text, takes
 // them out of the project's files.
-func ProjectInstructions(dir string, c ProjectInstr) (*Result, error) {
-	return change(func(l *Library) error {
+func ProjectInstructions(dir string, c ProjectInstr, options ...ProjectWriteOptions) (*Result, error) {
+	return changeProject(dir, projectInstructions, func(l *Library) error {
 		p := l.project(dir)
 		if p == nil {
 			return fmt.Errorf("no project %s", dir)
@@ -312,5 +323,5 @@ func ProjectInstructions(dir string, c ProjectInstr) (*Result, error) {
 			p.Instr = strings.TrimSpace(strings.ReplaceAll(*c.Text, "\r\n", "\n"))
 		}
 		return nil
-	})
+	}, options...)
 }

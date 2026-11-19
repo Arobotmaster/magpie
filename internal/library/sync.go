@@ -14,9 +14,11 @@ import (
 
 // Result is what a change did to the agents.
 type Result struct {
-	Changed  []string  `json:"changed"`  // agents whose files were written
-	Problems []Problem `json:"problems"` // what couldn't be written, and why
-	Backup   string    `json:"backup,omitempty"`
+	Writes   []ProjectWrite `json:"writes,omitempty"`
+	PlanID   string         `json:"planId,omitempty"`
+	Changed  []string       `json:"changed"`  // agents whose files were written
+	Problems []Problem      `json:"problems"` // what couldn't be written, and why
+	Backup   string         `json:"backup,omitempty"`
 	// Missing are the servers and skills (mcp:<name>, skill:<name>) a
 	// profile named that the library no longer has
 	Missing []string `json:"missing,omitempty"`
@@ -155,16 +157,16 @@ func syncSteps(all, gone []*Target, b *backups, res *Result) []func(*Library) {
 	}
 	// magpie's copies in a WSL distro no agent there is linked to any more
 	steps = append(steps, func(l *Library) { l.sweepWSLStores(append(slices.Clone(all), gone...), res) })
-	return append(steps, func(l *Library) { l.syncProjects(res) }, func(l *Library) { l.writeSubagentFiles() })
+	return append(steps, func(l *Library) { l.writeSubagentFiles() })
 }
 
-// Sync writes the library into the agents again: after an agent is
-// installed, or a profile brings another library in. magpie does one at
-// every start, and the Library page waits on the lock for each read and
-// change: held for the whole sync, through every agent's skills, the
-// first operations after opening magpie took seconds (#1624, Hipple).
-// It lets go after each agent's part, for whatever waits to go first.
-func Sync() (*Result, error) {
+// Sync explicitly reconciles all user-wide agents and registered projects.
+func Sync() (*Result, error) { return syncLibrary(true) }
+
+// SyncAgents refreshes user-wide agents without writing any project.
+func SyncAgents() (*Result, error) { return syncLibrary(false) }
+
+func syncLibrary(projects bool) (*Result, error) {
 	// a plugin's tools, a server of their own (plugin_tools.go)
 	if _, err := adoptPluginTools(); err != nil {
 		log.Printf("library: giving plugin tools a server: %v", err)
@@ -193,6 +195,9 @@ func Sync() (*Result, error) {
 		memo, heldAt = l, mu.held
 		return nil
 	}
+	if err := step(func(l *Library) { l.foldBeside() }); err != nil {
+		return nil, err
+	}
 	// the agents are found under the lock, as a change finds them
 	var npxDirs map[string]bool
 	if err := step(func(l *Library) { all = Targets(); gone = l.held(all); npxDirs = l.npxDirs() }); err != nil {
@@ -201,6 +206,11 @@ func Sync() (*Result, error) {
 	for _, f := range syncSteps(all, gone, b, res) {
 		if err := step(f); err != nil {
 			return nil, err
+		}
+	}
+	if projects {
+		if err := syncProjects(res); err != nil {
+			return res, err
 		}
 	}
 	res.Backup = b.dir
@@ -415,6 +425,12 @@ type AgentView struct {
 	// ProjectInstructions is the file in a project it reads the
 	// project's instructions from, when there is none yet
 	ProjectInstructions string `json:"projectInstructions,omitempty"`
+	// ProjectHooks is the file, in a project, it reads its own hooks from
+	// (project_hooks.go, #6874)
+	ProjectHooks string `json:"projectHooks,omitempty"`
+	// ProjectPi is the file, in a project, it reads packages and extensions
+	// from (project_pi.go)
+	ProjectPi string `json:"projectPi,omitempty"`
 	// ProjectNoSSE: its project file can't take a server over SSE
 	ProjectNoSSE bool `json:"projectNoSSE,omitempty"`
 	// ProjectOff and ProjectSkillOff: a server, or a skill, it has from
@@ -611,16 +627,19 @@ type View struct {
 
 // Read is the whole page: the library, and what's found in the agents.
 // problems are those of the last change, for the page to keep showing.
-func Read(problems []Problem) (*View, error) { return readView(problems, false) }
+func Read(problems []Problem) (*View, error) { return readView(problems, false, true) }
 
 // Glance is the page but for what takes reading the agents' skill folders
 // through: the skills the agents have of their own, and which copies are
 // out of date (Partial). The page shows it at once, and Read's after it
 // (0day404, #541): on a machine with many big skills in many agents, that
 // part can take minutes the first time.
-func Glance(problems []Problem) (*View, error) { return readView(problems, true) }
+func Glance(problems []Problem) (*View, error) { return readView(problems, true, true) }
 
-func readView(problems []Problem, glance bool) (*View, error) {
+// Inspect reads Library state for project commands without running maintenance.
+func Inspect(problems []Problem) (*View, error) { return readView(problems, false, false) }
+
+func readView(problems []Problem, glance, repair bool) (*View, error) {
 	mu.Lock()
 	locked := true
 	forget := func() {}
@@ -637,52 +656,54 @@ func readView(problems []Problem, glance bool) (*View, error) {
 	// each folder on the way to a path is looked at once while the lock
 	// is held (linkmemo.go, #1771)
 	forget = readParts()
-	// a skill whose app moved it to its new version's folder is linked
-	// there (skill_moved.go); what was kept of the links is let go then,
-	// for the rest of the read to see the new one
-	if l.followMovedSkills() {
-		forget()
-		forget = readParts()
-		if err := l.save(); err != nil {
-			return nil, err
-		}
-	}
-	// a skill that went in beside itself before magpie told the two
-	// apart (skill_beside.go) is folded back on the next read, not only on
-	// the next change: upgrading alone left blog-team beside blog (Refeccd
-	// on X). The agents' links follow at once, as after a change: a
-	// folded copy's folder is gone, and theirs would point at nothing.
-	if slices.ContainsFunc(l.Skills, func(s *Skill) bool { return s.Called != "" && s.Source.remote() }) {
-		if folded := l.foldBeside(); len(folded) > 0 {
+	if repair {
+		// a skill whose app moved it to its new version's folder is linked
+		// there (skill_moved.go); what was kept of the links is let go then,
+		// for the rest of the read to see the new one
+		if l.followMovedSkills() {
 			forget()
-			forget = func() {}
-			if err := l.save(); err != nil {
-				return nil, err
-			}
-			res := l.sync()
-			if err := l.save(); err != nil {
-				return nil, err
-			}
-			problems = append(slices.Clone(problems), res.Problems...)
 			forget = readParts()
-		}
-	}
-	// a plugin's tools, a server of their own (plugin_tools.go), and a
-	// Remote magpie's router (bridge_mcp.go): saved, and given to the
-	// agents by a sync of their own
-	if plugins, bridges := l.adoptPlugins(), l.adoptBridges(); plugins || bridges {
-		if err := l.save(); err != nil {
-			return nil, err
-		}
-		go func() {
-			if _, err := Sync(); err != nil {
-				log.Printf("library: syncing after plugin tools: %v", err)
+			if err := l.save(); err != nil {
+				return nil, err
 			}
-		}()
+		}
+		// a skill that went in beside itself before magpie told the two
+		// apart (skill_beside.go) is folded back on the next read, not only on
+		// the next change: upgrading alone left blog-team beside blog (Refeccd
+		// on X). The agents' links follow at once, as after a change: a
+		// folded copy's folder is gone, and theirs would point at nothing.
+		if slices.ContainsFunc(l.Skills, func(s *Skill) bool { return s.Called != "" && s.Source.remote() }) {
+			if folded := l.foldBeside(); len(folded) > 0 {
+				forget()
+				forget = func() {}
+				if err := l.save(); err != nil {
+					return nil, err
+				}
+				res := l.sync()
+				if err := l.save(); err != nil {
+					return nil, err
+				}
+				problems = append(slices.Clone(problems), res.Problems...)
+				forget = readParts()
+			}
+		}
+		// a plugin's tools, a server of their own (plugin_tools.go), and a
+		// Remote magpie's router (bridge_mcp.go): saved, and given to the
+		// agents by a sync of their own
+		if plugins, bridges := l.adoptPlugins(), l.adoptBridges(); plugins || bridges {
+			if err := l.save(); err != nil {
+				return nil, err
+			}
+			go func() {
+				if _, err := SyncAgents(); err != nil {
+					log.Printf("library: syncing after plugin tools: %v", err)
+				}
+			}()
+		}
 	}
 	// the agents are found once for the whole read: finding them looks
 	// through every agent's folders, in WSL too (#1624)
-	targets, asleep := targetsAsleep(false)
+	targets, asleep := targetsAsleep(false, false)
 	v := &View{Agents: []AgentView{}, Servers: []ServerView{}, Skills: []SkillView{}, FoundSkills: []FoundSkill{}, Instructions: l.instructionsView(targets, asleep), Dir: Dir(), Backups: BackupDir(), CopySkills: l.CopySkills, SharedSkills: l.SharedSkills, SharedDir: sharedSkillsDir(), AutoUpdateSkills: l.AutoUpdateSkills, MCPHub: l.MCPHub, SkillRouter: l.SkillRouter, HubPath: gateway.HubMCPPath, HubNote: settings.Shared().RouterNote, HubName: gateway.HostName(), HubAllTools: settings.Shared().RouterAllTools, HubFindsItself: hubFindsItself(), HubOnDemandOver: gateway.HubOnDemandOver, Partial: glance}
 	// each agent's skills folder as it really is, links followed: the
 	// agents reading the same one get copies together (copyWhy)
@@ -694,7 +715,7 @@ func readView(problems []Problem, glance bool) (*View, error) {
 	}
 	for _, t := range targets {
 		av := AgentView{ID: t.Agent.ID, Name: t.Agent.Name, Icon: t.Agent.Icon, Instructions: t.Instructions, Skills: t.Skills,
-			SkillsAlso: t.SkillsAlso, Note: t.Note, MCPVia: t.MCPVia, ProjectSkills: ProjectSkillsDir(t.Agent.ID), ProjectMCP: ProjectMCPFile(t.Agent.ID), ProjectSubagents: ProjectSubagentsDir(t.Agent.ID),
+			SkillsAlso: t.SkillsAlso, Note: t.Note, MCPVia: t.MCPVia, ProjectSkills: ProjectSkillsDir(t.Agent.ID), ProjectMCP: ProjectMCPFile(t.Agent.ID), ProjectSubagents: ProjectSubagentsDir(t.Agent.ID), ProjectHooks: ProjectHooksFile(t.Agent.ID), ProjectPi: ProjectPiSettings(t.Agent.ID),
 			ProjectInstructions: ProjectInstrFile(t.Agent.ID),
 			ProjectOff:          slices.Contains(projectOffAgents, t.Agent.ID), ProjectSkillOff: slices.Contains(projectSkillOffAgents, t.Agent.ID),
 			ProjectNoSSE: ProjectNoSSE(t.Agent.ID)}
@@ -1021,7 +1042,7 @@ type reach struct {
 
 func reachNow() reach {
 	r := reach{mcp: map[string]*mcpFile{}, shapes: map[string]*shape{}}
-	ts, asleep := targetsAsleep(false)
+	ts, asleep := targetsAsleep(false, false)
 	for _, t := range ts {
 		if t.MCP != nil {
 			r.mcp[t.Agent.ID] = t.MCP

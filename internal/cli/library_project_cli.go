@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"slices"
 	"sort"
@@ -13,6 +14,12 @@ import (
 )
 
 const libraryProjectUsage = `magpie library project [--json]      the projects (Library › Projects) and the skills each has
+  magpie library project --plan <mutation…>    preview the same project command without saving it
+  magpie library project --plan-id=<id> <mutation…>   apply the command after checking its preview
+  magpie library project plan <dir> [--json]      preview the project's pending writes
+  magpie library project apply <dir> [--plan-id=<id>]   write the project's saved assignments
+  magpie library project distribute <dir> skills|subagents|instructions on|off [--plan]
+                                     choose which category goes to related Git worktrees
   magpie library project add <dir>         add a folder whose agents can be given library skills
   magpie library project rm <dir> [--keep-files]   take it off; --keep-files leaves what magpie put there, yours from then on
   magpie library project skills <dir> [--json]     its skills, for which agents, and where each is placed
@@ -26,6 +33,38 @@ const libraryProjectUsage = `magpie library project [--json]      the projects (
                                      magpie's two marker lines, into the project file each agent reads: by default for
                                      the agents the shared instructions are on for, else every agent here that reads one
   magpie library project instructions <dir> agents <a,b…|none>   the agents whose project file they're written into
+  magpie library project hook add <dir> <hook…> [agents=a,b…]   give it hooks: by default for the agents its
+                                     hooks are for already, or, with none yet, every agent here that reads a
+                                     project's hooks (.claude/settings.local.json, .codex/hooks.json)
+  magpie library project hook rm <dir> <hook…>   take hooks out of it
+  magpie library project hook agents <dir> <hook> <a,b…|none>   the agents it has the hook for
+  magpie library project hooks <dir> [--json]   its hooks, for which agents, and the entries magpie wrote
+  magpie library project subagents <dir> [--json]   its subagents, for which agents, and the files magpie wrote
+  magpie library project subagents add <dir> <name…> [agents=a,b…]   give it subagents: by default for the agents
+                                     its subagents are for already, or, with none yet, every agent here that reads a
+                                     project's subagents (.claude/agents, .codex/agents…)
+  magpie library project subagents rm <dir> <name…>   take subagents out of it
+  magpie library project subagents agents <dir> <name> <a,b…|none>   the agents it has the subagent for
+  magpie library project server <dir> [--json]  its MCP servers, and which agents have each
+  magpie library project server add <dir> <name> [agents=a,b…]   give it a server the library keeps:
+                                     written into the file that agent reads a project's servers from
+                                     (.mcp.json, .codex/config.toml, .pi/mcp.json…)
+  magpie library project server rm <dir> <name…>   take servers out of it
+  magpie library project server agents <dir> <name> <a,b…|none>   the agents it has the server for
+  magpie library project plugin <dir> [--json]  the Claude Code plugins it turns on or off itself
+  magpie library project plugin on|off <dir> <id>   turn one on or off in the project's own
+                                     .claude/settings.local.json (the plugin is installed by Claude Code)
+  magpie library project pi <dir> [--json]      its Pi packages and extensions, and what magpie wrote there
+  magpie library project pi add <dir> package|extension <source…>   give the project Pi packages or
+                                     extensions of its own, written into its own .pi/settings.json
+  magpie library project pi off <dir> package|extension <source…>   stop loading them, KEEPING the entry (Pi's "-<source>")
+  magpie library project pi on <dir> package|extension <source…>    load them again (same entry, no re-entry needed)
+  magpie library project pi rm <dir> package|extension <source…>    take them out of the project for real
+  magpie library project pi scope <dir> package|extension <source> anywhere|project
+  magpie library project pi adopt <dir> package|extension <source> [--scope=project|anywhere]
+                                     where a Pi entry belongs: anywhere is the project's set, loaded in each worktree of
+                                     its repository too; project keeps it to the project's own folder, and with every
+                                     entry so scoped magpie keeps the .pi/settings.json it made out of git
                                      <dir> may be relative, or "." for the folder you're in. A skill that couldn't be
                                      placed (a folder there that isn't magpie's is left as it is) is named, and the
                                      command exits with status 1.
@@ -36,6 +75,22 @@ const libraryProjectUsage = `magpie library project [--json]      the projects (
 // its page makes.
 func libraryProjectCmd(args []string) error {
 	usage := func() error { return fmt.Errorf("usage:\n  %s", libraryProjectUsage) }
+	var options library.ProjectWriteOptions
+	if len(args) != 0 {
+		if args[0] == "--plan" {
+			options.Preview = true
+			args = args[1:]
+		} else if id, ok := strings.CutPrefix(args[0], "--plan-id="); ok {
+			if id == "" {
+				return usage()
+			}
+			options.PlanID = id
+			args = args[1:]
+		}
+	}
+	if len(args) == 0 && (options.Preview || options.PlanID != "") {
+		return usage()
+	}
 	if len(args) == 0 || len(args) == 1 && (args[0] == "list" || args[0] == "--json") || len(args) == 2 && args[0] == "list" && args[1] == "--json" {
 		return listProjects("", slices.Contains(args, "--json"))
 	}
@@ -43,6 +98,8 @@ func libraryProjectCmd(args []string) error {
 	case "help", "-h", "--help":
 		fmt.Print("  " + libraryProjectUsage)
 		return nil
+	case "plan", "apply", "distribute":
+		return projectWritesCmd(sub, rest, usage, options)
 	case "add":
 		if len(rest) != 1 || strings.HasPrefix(rest[0], "-") {
 			return usage()
@@ -51,8 +108,9 @@ func libraryProjectCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := library.AddProject(dir); err != nil {
-			return err
+		res, err := library.AddProject(dir, options)
+		if err != nil || options.Preview {
+			return projectCommandResult(res, err, options.Preview)
 		}
 		fmt.Println(green.Render("✓"), dir, "is a project")
 		fmt.Println(muted.Render("  magpie library project skill add " + quoteArg(dir) + " <skill…> gives it skills"))
@@ -77,8 +135,9 @@ func libraryProjectCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := library.RemoveProject(dir, keep); err != nil {
-			return err
+		res, err := library.RemoveProject(dir, keep, options)
+		if err != nil || options.Preview {
+			return projectCommandResult(res, err, options.Preview)
 		}
 		// what couldn't be taken out keeps the project listed
 		if p, _ := library.ProjectAt(dir); p != "" {
@@ -96,11 +155,27 @@ func libraryProjectCmd(args []string) error {
 		if len(rest) != 1 || strings.HasPrefix(rest[0], "-") {
 			return usage()
 		}
-		dir, err := projectDir(rest[0])
-		if err != nil {
-			return err
+		return listProjects(rest[0], asJSON)
+	case "hooks":
+		asJSON := slices.Contains(rest, "--json")
+		rest = slices.DeleteFunc(slices.Clone(rest), func(a string) bool { return a == "--json" })
+		if len(rest) != 1 || strings.HasPrefix(rest[0], "-") {
+			return usage()
 		}
-		return listProjects(dir, asJSON)
+		if asJSON {
+			return listProjects(rest[0], true)
+		}
+		return listProjectHooks(rest[0])
+	case "hook":
+		return libraryProjectHookCmd(rest, usage, options)
+	case "subagents":
+		return libraryProjectSubagentCmd(rest, usage, options)
+	case "server", "servers":
+		return libraryProjectServerCmd(rest, usage, options)
+	case "pi":
+		return libraryProjectPiCmd(rest, usage, options)
+	case "plugin", "plugins":
+		return libraryProjectPluginCmd(rest, usage, options)
 	case "copy":
 		if len(rest) != 2 || strings.HasPrefix(rest[0], "-") || rest[1] != "on" && rest[1] != "off" {
 			return usage()
@@ -109,15 +184,15 @@ func libraryProjectCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		res, err := library.ProjectCopy(dir, rest[1] == "on")
-		if err != nil {
-			return err
+		res, err := library.ProjectCopy(dir, rest[1] == "on", options)
+		if err != nil || options.Preview {
+			return projectCommandResult(res, err, options.Preview)
 		}
 		if err := projectOutcome(dir, nil, res); err != nil {
 			return err
 		}
 		if rest[1] == "on" {
-			fmt.Println(green.Render("✓"), dir, "gets copies of its skills, made again whenever the library's skill changes")
+			fmt.Println(green.Render("✓"), dir, "gets copies of its skills, refreshed on project or full sync")
 		} else {
 			fmt.Println(green.Render("✓"), dir, "gets links to the library's skills")
 		}
@@ -126,14 +201,76 @@ func libraryProjectCmd(args []string) error {
 		if len(rest) == 0 {
 			return usage()
 		}
-		return projectSkillCmd(rest[0], rest[1:], usage)
+		return projectSkillCmd(rest[0], rest[1:], usage, options)
 	case "instructions", "instr":
-		return projectInstrCmd(rest, usage)
+		return projectInstrCmd(rest, usage, options)
 	}
 	return fmt.Errorf("no library project command %q\n  %s", args[0], libraryProjectUsage)
 }
 
-func projectSkillCmd(verb string, rest []string, usage func() error) error {
+func projectWritesCmd(action string, args []string, usage func() error, options library.ProjectWriteOptions) error {
+	if len(args) == 0 {
+		return usage()
+	}
+	dir, err := projectDir(args[0])
+	if err != nil {
+		return err
+	}
+	args = args[1:]
+	var res *library.Result
+	switch action {
+	case "plan":
+		if len(args) > 1 || len(args) == 1 && args[0] != "--json" {
+			return usage()
+		}
+		res, err = library.ProjectPlan(dir)
+		if err == nil && len(args) == 1 {
+			return json.NewEncoder(os.Stdout).Encode(res)
+		}
+	case "apply":
+		if len(args) == 1 {
+			id, ok := strings.CutPrefix(args[0], "--plan-id=")
+			if !ok || id == "" {
+				return usage()
+			}
+			options.PlanID = id
+		} else if len(args) > 1 {
+			return usage()
+		}
+		res, err = library.ProjectApply(dir, options)
+	case "distribute":
+		if len(args) < 2 || len(args) > 3 || args[1] != "on" && args[1] != "off" || len(args) == 3 && args[2] != "--plan" {
+			return usage()
+		}
+		options.Preview = options.Preview || len(args) == 3
+		res, err = library.ProjectDistributeCategory(dir, args[0], args[1] == "on", options)
+	}
+	return projectCommandResult(res, err, options.Preview || action == "plan")
+}
+
+func projectCommandResult(res *library.Result, err error, preview bool) error {
+	if err != nil {
+		return err
+	}
+	for _, w := range res.Writes {
+		fmt.Printf("%s %s\n", w.Action, w.Path)
+		for _, f := range w.Files {
+			fmt.Printf("  %s\n", f)
+		}
+	}
+	for _, problem := range res.Problems {
+		fmt.Fprintf(os.Stderr, "%s %s: %s\n", problem.Agent, problem.What, problem.Error)
+	}
+	if preview {
+		fmt.Printf("Plan ID %s\n", res.PlanID)
+	}
+	if len(res.Problems) > 0 {
+		return fmt.Errorf("%d project paths or resources could not be reconciled", len(res.Problems))
+	}
+	return nil
+}
+
+func projectSkillCmd(verb string, rest []string, usage func() error, options library.ProjectWriteOptions) error {
 	if len(rest) < 2 || strings.HasPrefix(rest[0], "-") {
 		return usage()
 	}
@@ -141,7 +278,7 @@ func projectSkillCmd(verb string, rest []string, usage func() error) error {
 	if err != nil {
 		return err
 	}
-	v, err := library.Read(nil)
+	v, err := library.Inspect(nil)
 	if err != nil {
 		return err
 	}
@@ -175,9 +312,9 @@ func projectSkillCmd(verb string, rest []string, usage func() error) error {
 		if len(agents) == 0 {
 			return fmt.Errorf("no agent here reads a project's skills: name them with agents=a,b…")
 		}
-		res, err := library.ProjectSkills(dir, names, agents)
-		if err != nil {
-			return err
+		res, err := library.ProjectSkills(dir, names, agents, options)
+		if err != nil || options.Preview {
+			return projectCommandResult(res, err, options.Preview)
 		}
 		return projectOutcome(dir, names, res)
 	case "rm", "remove":
@@ -191,9 +328,9 @@ func projectSkillCmd(verb string, rest []string, usage func() error) error {
 			}
 			names = addOnce(names, a)
 		}
-		res, err := library.ProjectSkills(dir, names, nil)
-		if err != nil {
-			return err
+		res, err := library.ProjectSkills(dir, names, nil, options)
+		if err != nil || options.Preview {
+			return projectCommandResult(res, err, options.Preview)
 		}
 		if err := projectOutcome(dir, nil, res); err != nil {
 			return err
@@ -208,9 +345,9 @@ func projectSkillCmd(verb string, rest []string, usage func() error) error {
 		if err != nil {
 			return err
 		}
-		res, err := library.ProjectSkill(dir, rest[1], agents)
-		if err != nil {
-			return err
+		res, err := library.ProjectSkill(dir, rest[1], agents, options)
+		if err != nil || options.Preview {
+			return projectCommandResult(res, err, options.Preview)
 		}
 		if len(agents) == 0 {
 			if err := projectOutcome(dir, nil, res); err != nil {
@@ -317,10 +454,21 @@ func projectOutcome(dir string, names []string, res *library.Result) error {
 	if why := p.Problems[""]; why != "" {
 		fmt.Println(amber.Render("!"), dir+":", why)
 	}
+	for _, problem := range res.Skipped {
+		if problem.Agent == dir && strings.HasPrefix(problem.What, "project:") {
+			fmt.Println(muted.Render("  " + problem.Error + " · skipped"))
+		}
+	}
 	var unplaced []string
 	for _, n := range names {
 		placed, why := skillPlaces(p, n)
+		if len(placed) == 0 && p.Problems[n] == "" && projectSkipped(res, dir, n) {
+			continue
+		}
 		if why != "" {
+			if p.Problems[n] == "" && projectSkipped(res, dir, n) {
+				continue
+			}
 			unplaced = append(unplaced, n)
 			fmt.Println(amber.Render("!"), n, muted.Render("not placed:"), why)
 			continue
@@ -331,6 +479,12 @@ func projectOutcome(dir string, names []string, res *library.Result) error {
 		return fmt.Errorf("%s not placed in %s", strings.Join(unplaced, ", "), dir)
 	}
 	return nil
+}
+
+func projectSkipped(res *library.Result, dir, what string) bool {
+	return slices.ContainsFunc(res.Skipped, func(row library.Problem) bool {
+		return row.Agent == dir && row.What == "project:"+what
+	})
 }
 
 // skillPlaces are the entries of a project's skill magpie placed, and,
@@ -356,17 +510,19 @@ func skillPlaces(p *library.ProjectView, name string) (placed []string, why stri
 
 // listProjects prints the projects, or one, with their skills.
 func listProjects(dir string, asJSON bool) error {
-	v, err := library.Read(nil)
-	if err != nil {
-		return err
-	}
-	ps := v.Projects
+	var ps []library.ProjectView
 	if dir != "" {
-		p := projectView(v, dir)
-		if p == nil {
-			return fmt.Errorf("%s isn't a project", dir)
+		p, err := library.ReadProject(dir)
+		if err != nil {
+			return err
 		}
 		ps = []library.ProjectView{*p}
+	} else {
+		v, err := library.Inspect(nil)
+		if err != nil {
+			return err
+		}
+		ps = v.Projects
 	}
 	if asJSON {
 		e := json.NewEncoder(os.Stdout)
@@ -388,12 +544,16 @@ func listProjects(dir string, asJSON bool) error {
 			head += " " + muted.Render("(copies)")
 		}
 		fmt.Println(head)
+		printProjectNative(&p, "skills")
+		for _, rel := range slices.Sorted(maps.Keys(p.SkillLinks)) {
+			fmt.Println(" ", rel, muted.Render("(MagPie link to project skill)"))
+		}
 		names := make([]string, 0, len(p.Skills))
 		for n := range p.Skills {
 			names = append(names, n)
 		}
 		sort.Strings(names)
-		if len(names) == 0 {
+		if len(names) == 0 && len(p.Native["skills"]) == 0 {
 			fmt.Println(" ", muted.Render("no skills yet · magpie library project skill add "+quoteArg(p.Dir)+" <skill…>"))
 		}
 		for _, n := range names {
@@ -408,6 +568,13 @@ func listProjects(dir string, asJSON bool) error {
 	return nil
 }
 
+func printProjectNative(p *library.ProjectView, kind string) {
+	for _, entry := range p.Native[kind] {
+		detail := strings.TrimSpace(strings.Join([]string{entry.Agent, entry.Event, entry.Path}, " "))
+		fmt.Printf("  %s  %s %s\n", entry.Name, muted.Render(detail), muted.Render("(project-provided)"))
+	}
+}
+
 // quoteArg is a path as a shell takes it back.
 func quoteArg(s string) string {
 	if s != "" && !strings.ContainsAny(s, " \t'\"$`\\!*?[]{}()&;|<>#~") {
@@ -418,18 +585,18 @@ func quoteArg(s string) string {
 
 // projectInstrCmd is magpie library project instructions …: the project's
 // own instructions, as the Instructions page's project card sets them.
-func projectInstrCmd(rest []string, usage func() error) error {
+func projectInstrCmd(rest []string, usage func() error, options library.ProjectWriteOptions) error {
 	asJSON := slices.Contains(rest, "--json")
 	rest = slices.DeleteFunc(slices.Clone(rest), func(a string) bool { return a == "--json" })
 	if len(rest) == 0 || strings.HasPrefix(rest[0], "-") {
 		return usage()
 	}
+	if len(rest) == 1 {
+		return showProjectInstr(rest[0], asJSON)
+	}
 	dir, err := projectDir(rest[0])
 	if err != nil {
 		return err
-	}
-	if len(rest) == 1 {
-		return showProjectInstr(dir, asJSON)
 	}
 	var c library.ProjectInstr
 	switch rest[1] {
@@ -456,7 +623,7 @@ func projectInstrCmd(rest []string, usage func() error) error {
 		c.Text = &text
 		// the first text a project gets goes to the agents the shared
 		// instructions are on for, as the page's card does it
-		v, err := library.Read(nil)
+		v, err := library.Inspect(nil)
 		if err != nil {
 			return err
 		}
@@ -479,9 +646,9 @@ func projectInstrCmd(rest []string, usage func() error) error {
 	default:
 		return usage()
 	}
-	res, err := library.ProjectInstructions(dir, c)
-	if err != nil {
-		return err
+	res, err := library.ProjectInstructions(dir, c, options)
+	if err != nil || options.Preview {
+		return projectCommandResult(res, err, options.Preview)
 	}
 	v, err := library.Read(res.Problems)
 	if err != nil {
@@ -503,21 +670,20 @@ func projectInstrCmd(rest []string, usage func() error) error {
 }
 
 func showProjectInstr(dir string, asJSON bool) error {
-	v, err := library.Read(nil)
+	p, err := library.ReadProject(dir)
 	if err != nil {
 		return err
-	}
-	p := projectView(v, dir)
-	if p == nil {
-		return fmt.Errorf("%s isn't a project", dir)
 	}
 	if asJSON {
 		e := json.NewEncoder(os.Stdout)
 		e.SetIndent("", "  ")
-		return e.Encode(map[string]any{"dir": p.Dir, "text": p.Instr, "agents": p.InstrAgents, "files": p.InstrFiles})
+		return e.Encode(map[string]any{"dir": p.Dir, "text": p.Instr, "agents": p.InstrAgents, "files": p.InstrFiles, "native": p.Native["instructions"]})
 	}
+	printProjectNative(p, "instructions")
 	if p.Instr == "" {
-		fmt.Println(muted.Render("No instructions of its own · magpie library project instructions " + quoteArg(dir) + " text <text…>"))
+		if len(p.Native["instructions"]) == 0 {
+			fmt.Println(muted.Render("No instructions of its own · magpie library project instructions " + quoteArg(dir) + " text <text…>"))
+		}
 		return nil
 	}
 	if len(p.InstrAgents) == 0 {

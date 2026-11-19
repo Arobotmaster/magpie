@@ -50,6 +50,15 @@ func helpFor(args []string) string {
 		if len(args) > 1 && (args[1] == "project" || args[1] == "projects") {
 			return "  " + libraryProjectUsage
 		}
+		// the Library's Claude Code plugins (library_bundle_cli.go), which has
+		// its own verbs; without this `magpie library plugin --help` printed
+		// the library's own usage instead of the command's.
+		if len(args) > 1 && (args[1] == "plugin" || args[1] == "plugins") {
+			return "  " + libraryBundleUsage
+		}
+		if len(args) > 1 && (args[1] == "mcp" || args[1] == "mcps") {
+			return "  " + libraryUsage
+		}
 		return "  " + libraryUsage
 	case "plugin", "plugins":
 		return pluginUsage
