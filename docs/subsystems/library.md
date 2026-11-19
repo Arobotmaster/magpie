@@ -217,6 +217,12 @@ existing project declaration as managed with project scope. The existing
 declaration stays in place. Use `--scope=anywhere` when it should belong to
 the project's general set.
 
+`InstallPlugins` also accepts a Pi `package.json` with a `pi` object or the
+`pi-package` keyword. [`assignProjectPiBundle`](../../internal/library/project_pi_bundle.go)
+uses the project write plan to declare the library copy as one Pi package.
+An existing project declaration for the original local folder, library
+copy, or the same npm package keeps its filters, version and ownership.
+
 The project plugin card and the `library plugin` and `library project
 plugin` listings show library bundles, Claude Code installation records,
 project declarations, Codex MCP servers and Pi packages by source. An
@@ -269,3 +275,26 @@ The listings and project card show that snapshot alongside installation
 and enablement. Listings without a project have no session scope. They
 and the project card read the existing data without starting an agent.
 See [plugin discovery](../../internal/library/plugin_discovery.go).
+
+To assign an imported bundle to a registered project, preview
+`magpie library project --plan bundle add <dir> <bundle> agents=claude,codex,pi`.
+Repeat the same command with `--plan-id=<id>` in place of `--plan` to verify
+and apply it. Add `--json` to get the plan ID, writes, skips and problems
+as JSON. [ProjectBundle](../../internal/library/project_bundle.go) adds the
+bundle's skills, subagents, supported hooks and MCP servers to the existing
+Claude Code and Codex project assignments. Pi uses the package declaration
+described above. An unsupported part or a resource already supplied
+by the project is reported as a skip. The same project staging and rollback
+cover the whole bundle. A planning problem prevents the bundle from applying.
+
+An enabled native plugin with an installation in effect for the target
+project can supply the bundle for that agent. The
+[source check](../../internal/library/project_bundle_native.go) uses the
+native plugin's install path or marketplace entry together with its
+configuration. A shared name alone cannot match. Repeating the bundle
+command after enabling a native plugin removes the redundant project
+assignments for that agent through the existing ownership checks. The
+native plugin and user-wide library assignments stay in their own settings.
+Existing project distribution switches still control sharing. When an
+affected linked worktree already loads a matching native plugin, the
+command reports the conflict before writing the bundle.

@@ -18,6 +18,8 @@ const libraryProjectUsage = `magpie library project [--json]      the projects (
   magpie library project --plan-id=<id> <mutation…>   apply the command after checking its preview
   magpie library project plan <dir> [--json]      preview the project's pending writes
   magpie library project apply <dir> [--plan-id=<id>]   write the project's saved assignments
+  magpie library project bundle add <dir> <bundle> agents=claude,codex,pi [--json]
+                                     give the project the bundle's supported library resources
   magpie library project distribute <dir> skills|subagents|instructions on|off [--plan]
                                      choose which category goes to related Git worktrees
   magpie library project add <dir>         add a folder whose agents can be given library skills
@@ -100,6 +102,8 @@ func libraryProjectCmd(args []string) error {
 		return nil
 	case "plan", "apply", "distribute":
 		return projectWritesCmd(sub, rest, usage, options)
+	case "bundle":
+		return projectBundleCmd(rest, usage, options)
 	case "add":
 		if len(rest) != 1 || strings.HasPrefix(rest[0], "-") {
 			return usage()
@@ -206,6 +210,41 @@ func libraryProjectCmd(args []string) error {
 		return projectInstrCmd(rest, usage, options)
 	}
 	return fmt.Errorf("no library project command %q\n  %s", args[0], libraryProjectUsage)
+}
+
+func projectBundleCmd(args []string, usage func() error, options library.ProjectWriteOptions) error {
+	asJSON := len(args) == 5 && args[4] == "--json"
+	if asJSON {
+		args = args[:4]
+	}
+	if len(args) != 4 || args[0] != "add" || strings.HasPrefix(args[1], "-") || strings.HasPrefix(args[2], "-") {
+		return usage()
+	}
+	agents, ok := strings.CutPrefix(args[3], "agents=")
+	if !ok || agents == "" {
+		return usage()
+	}
+	dir, err := projectDir(args[1])
+	if err != nil {
+		return err
+	}
+	res, err := library.ProjectBundle(dir, args[2], strings.Split(agents, ","), options)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		if err := json.NewEncoder(os.Stdout).Encode(res); err != nil {
+			return err
+		}
+		if len(res.Problems) != 0 {
+			return fmt.Errorf("%d project paths or resources could not be reconciled", len(res.Problems))
+		}
+		return nil
+	}
+	for _, skip := range res.Skipped {
+		fmt.Printf("skip %s %s: %s\n", skip.Agent, skip.What, skip.Error)
+	}
+	return projectCommandResult(res, nil, options.Preview)
 }
 
 func projectWritesCmd(action string, args []string, usage func() error, options library.ProjectWriteOptions) error {

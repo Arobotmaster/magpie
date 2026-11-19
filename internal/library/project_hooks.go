@@ -74,6 +74,17 @@ func projectHookSpec(p *Project, id string) *hookSpec {
 	return &cp
 }
 
+func projectHookEvent(sp *hookSpec, id string, h *Hook) (string, error) {
+	if sp == nil {
+		return "", fmt.Errorf("%s reads no project hooks file magpie can write", id)
+	}
+	ev, err := sp.event(id, h)
+	if err == nil && h.Event == "session-start" {
+		_, err = startMatcher(id, h.Matcher)
+	}
+	return ev, err
+}
+
 // projectHookHash is what a written entry is recorded as: the same
 // canonical form the entry is compared in when it is taken away again.
 func projectHookHash(entry json.RawMessage) string { return canonical(entry) }
@@ -103,10 +114,7 @@ func (l *Library) syncProjectHooks(p *Project, fail func(what string, err error)
 			if sp == nil {
 				continue
 			}
-			ev, err := sp.event(id, h)
-			if err == nil && h.Event == "session-start" {
-				_, err = startMatcher(id, h.Matcher)
-			}
+			ev, err := projectHookEvent(sp, id, h)
 			if err != nil {
 				fail("hook:"+h.Name, fmt.Errorf("%s: %w", id, err))
 				continue
@@ -378,10 +386,7 @@ func ProjectHooks(dir string, names, agents []string, options ...ProjectWriteOpt
 				if h == nil {
 					continue
 				}
-				ev, err := sp.event(id, h)
-				if err == nil && h.Event == "session-start" {
-					_, err = startMatcher(id, h.Matcher)
-				}
+				ev, err := projectHookEvent(sp, id, h)
 				if err != nil {
 					return fmt.Errorf("%s can't take %s: %w", id, n, err)
 				}

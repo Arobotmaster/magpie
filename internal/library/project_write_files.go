@@ -37,10 +37,14 @@ type projectUndo struct {
 }
 
 type projectWrites struct {
-	dir   string
-	files map[string]*projectFile
-	other map[string]projectWrite
-	git   map[string]*projectGit
+	dir     string
+	files   map[string]*projectFile
+	other   map[string]projectWrite
+	git     map[string]*projectGit
+	parts   projectParts
+	intent  string
+	skipped []Problem
+	verify  func() error
 }
 
 func newProjectWrites() (*projectWrites, error) {
@@ -48,7 +52,7 @@ func newProjectWrites() (*projectWrites, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &projectWrites{dir, map[string]*projectFile{}, map[string]projectWrite{}, map[string]*projectGit{}}, nil
+	return &projectWrites{dir: dir, files: map[string]*projectFile{}, other: map[string]projectWrite{}, git: map[string]*projectGit{}}, nil
 }
 
 func (w *projectWrites) close() { _ = os.RemoveAll(w.dir) }

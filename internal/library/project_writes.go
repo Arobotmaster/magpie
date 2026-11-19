@@ -127,6 +127,7 @@ func (l *Library) writeProject(dir string, parts projectParts, change func(*Libr
 		return nil, err
 	}
 	defer w.close()
+	w.parts = parts
 	if p != nil {
 		if fi, err := os.Lstat(p.Dir); err == nil && linkEntry(fi) {
 			return nil, fmt.Errorf("%s is a redirected project root", p.Dir)
@@ -142,7 +143,8 @@ func (l *Library) writeProject(dir string, parts projectParts, change func(*Libr
 	if err := change(l); err != nil {
 		return nil, err
 	}
-	res := &Result{Changed: []string{}, Problems: []Problem{}, Writes: []ProjectWrite{}}
+	res := &Result{Changed: []string{}, Problems: []Problem{}, Writes: []ProjectWrite{}, Skipped: w.skipped}
+	parts = w.parts
 	if p != nil && parts != 0 && l.project(dir) != nil {
 		l.syncProject(p, res, parts)
 		if p.removeAfter && len(res.Problems) == 0 && !p.holds() && p.Claude == nil && !slices.ContainsFunc(p.Trees, (*Project).holds) {
@@ -170,6 +172,15 @@ func (l *Library) writeProject(dir string, parts projectParts, change func(*Libr
 		return nil, err
 	}
 	digest := sha256.New()
+	if w.intent != "" {
+		fmt.Fprintln(digest, w.intent)
+		slices.SortFunc(res.Skipped, func(a, b Problem) int {
+			return strings.Compare(a.Agent+"\x00"+a.What+"\x00"+a.Error, b.Agent+"\x00"+b.What+"\x00"+b.Error)
+		})
+		for _, skip := range res.Skipped {
+			fmt.Fprintf(digest, "%q %q %q\n", skip.Agent, skip.What, skip.Error)
+		}
+	}
 	for _, op := range ops {
 		res.Writes = append(res.Writes, op.ProjectWrite)
 		fmt.Fprintf(digest, "%q %q %q\n", op.Path, op.Action, op.fingerprint)
@@ -188,6 +199,13 @@ func (l *Library) writeProject(dir string, parts projectParts, change func(*Libr
 	if opt.PlanID != "" && opt.PlanID != res.PlanID {
 		return nil, errors.New("project write plan changed; preview it again")
 	}
+	if w.intent != "" && len(res.Problems) != 0 {
+		// A bundle is one operation even when some of its files were
+		// staged successfully. Other project commands keep their existing
+		// behavior of applying the paths they could reconcile.
+		res.Writes = nil
+		return res, nil
+	}
 	// Refresh Git state and all paths before making the first edit.
 	if slices.ContainsFunc(ops, func(op projectWrite) bool {
 		return op.Path == filepath.Join(realBelow(filepath.Dir(claudeJSON())), filepath.Base(claudeJSON()))
@@ -201,6 +219,11 @@ func (l *Library) writeProject(dir string, parts projectParts, change func(*Libr
 	clear(w.git)
 	for _, op := range ops {
 		if err := op.check(); err != nil {
+			return res, err
+		}
+	}
+	if w.verify != nil {
+		if err := w.verify(); err != nil {
 			return res, err
 		}
 	}

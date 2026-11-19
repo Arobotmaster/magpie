@@ -283,7 +283,7 @@ func (l *Library) putPlugins(in []*CarriedPlugin, stage string) (fetch []*Carrie
 			fail(err)
 			continue
 		}
-		if pl.parts() == 0 {
+		if !pl.hasPayload() {
 			fail(fmt.Errorf("%s has no skills, MCP servers, hooks or subagents magpie can give an agent", c.Name))
 			continue
 		}

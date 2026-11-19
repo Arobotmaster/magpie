@@ -121,10 +121,11 @@ type plLoaded struct {
 	agents                     []*Subagent
 	left                       []PluginLeft
 	manifestNames              []string
+	piPackage                  bool
 }
 
-func (p *plLoaded) parts() int {
-	return len(p.skills) + len(p.servers) + len(p.hooks) + len(p.agents)
+func (p *plLoaded) hasPayload() bool {
+	return p.piPackage || len(p.skills)+len(p.servers)+len(p.hooks)+len(p.agents) > 0
 }
 
 func readJSONFile(p string) (map[string]any, error) {
@@ -260,8 +261,14 @@ func readPlugin(dir, hint, force string, over map[string]any) (*plLoaded, error)
 			man[k] = v
 		}
 	}
-	if !isPlugin(dir) && len(man) == 0 {
-		return nil, fmt.Errorf("no plugin in %s: it has no .claude-plugin/plugin.json, .codex-plugin/plugin.json, skills, agents, hooks or .mcp.json", dir)
+	pi, _ := readPiBundleManifest(dir)
+	if !isPlugin(dir) && len(man) == 0 && pi == nil {
+		return nil, fmt.Errorf("no plugin in %s: it has no .claude-plugin/plugin.json, .codex-plugin/plugin.json, Pi package.json, skills, agents, hooks or .mcp.json", dir)
+	}
+	for _, k := range []string{"name", "description", "version"} {
+		if plStr(man[k]) == "" && pi[k] != nil {
+			man[k] = pi[k]
+		}
 	}
 	name := pluginSlug(force)
 	if name == "" {
@@ -276,7 +283,7 @@ func readPlugin(dir, hint, force string, over map[string]any) (*plLoaded, error)
 	if name == "" {
 		return nil, errors.New("the plugin has no name")
 	}
-	p := &plLoaded{name: name, description: strings.Join(strings.Fields(plStr(man["description"])), " "), version: plStr(man["version"])}
+	p := &plLoaded{name: name, description: strings.Join(strings.Fields(plStr(man["description"])), " "), version: plStr(man["version"]), piPackage: pi != nil}
 	if _, err := os.Stat(filepath.Join(dir, ".claude-plugin", "plugin.json")); err == nil {
 		p.manifestNames = append(p.manifestNames, "claude")
 	}
@@ -431,14 +438,6 @@ func readPlugin(dir, hint, force string, over map[string]any) (*plLoaded, error)
 	}
 	for _, doc := range codexHookDocs {
 		hooks, left := plHooksOfOwned(doc, name, root, sub, &n, "codex")
-		for _, h := range hooks {
-			// Codex's manifest named it, so Codex runs it and no other agent:
-			// an agent-own event is what the library has for "only this one".
-			// A Codex manifest's own `Stop`/`SessionStart` keeps its portable
-			// name in the other direction, so mark it with its Codex spelling.
-			h.Event = codexOwnEvent(h.Event)
-			h.Agents = []string{"codex"}
-		}
 		p.hooks = append(p.hooks, hooks...)
 		p.left = append(p.left, left...)
 	}
@@ -655,7 +654,15 @@ func plHooksOfOwned(doc map[string]any, bundle, root string, sub func(string) st
 	sort.Strings(events)
 	var out []*Hook
 	var left []PluginLeft
+	var owned *hookSpec
+	if owner != "" {
+		owned, _ = hookSpecOf(&Target{Agent: &agent.Agent{ID: owner}})
+	}
 	for _, ev := range events {
+		if owned != nil && !slices.Contains(owned.native, ev) {
+			left = append(left, PluginLeft{What: ev + " hook", Why: owner + " has no event called " + ev})
+			continue
+		}
 		groups, _ := m[ev].([]any)
 		for _, g := range groups {
 			gm, _ := g.(map[string]any)
@@ -693,7 +700,9 @@ func plHooksOfOwned(doc map[string]any, bundle, root string, sub func(string) st
 				if t, ok := hm["timeout"].(float64); ok && t > 0 && t <= 86400 {
 					x.Timeout = int(t)
 				}
-				if portable, ok := claudeEvents[ev]; ok {
+				if owned != nil {
+					x.Event, x.Matcher, x.Agents = owner+":"+ev, matcher, []string{owner}
+				} else if portable, ok := claudeEvents[ev]; ok {
 					k, tools := toolKind(matcher)
 					switch {
 					case slices.Contains(toolEvents, portable) && tools:
@@ -721,12 +730,6 @@ func plHooksOfOwned(doc map[string]any, bundle, root string, sub func(string) st
 						continue
 					}
 					x.Event, x.Matcher = "claude:"+ev, matcher
-				}
-				if owner != "" {
-					// The agent whose manifest named this file runs it, and no
-					// other: an agent-own event is how the library says that.
-					x.Event = owner + ":" + hookEventFor(x.Event, owner)
-					x.Agents = []string{owner}
 				}
 				if err := x.check(); err != nil {
 					left = append(left, PluginLeft{What: ev + " hook", Why: err.Error()})
@@ -1101,7 +1104,7 @@ func installPlugins(p *PluginProbe, input string, names, agents []string) (*Resu
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", c.Name, err)
 		}
-		if pl.parts() == 0 {
+		if !pl.hasPayload() {
 			return nil, fmt.Errorf("%s has no skills, MCP servers, hooks or subagents magpie can give an agent", pl.name)
 		}
 		ones = append(ones, one{c, pl, d})
@@ -1252,7 +1255,7 @@ func installPlugin(l *Library, pl *plLoaded, dir, input, pick string, agents []s
 		l.Subagents = append(l.Subagents, s)
 		b.Subagents = append(b.Subagents, n)
 	}
-	if len(b.Skills)+len(b.MCP)+len(b.Hooks)+len(b.Subagents) == 0 {
+	if !pl.piPackage && len(b.Skills)+len(b.MCP)+len(b.Hooks)+len(b.Subagents) == 0 {
 		os.RemoveAll(pluginDir(pl.name))
 		return nil, errors.New("every part of it clashes with the library's own: " + skipped[len(skipped)-1].Error)
 	}
@@ -1464,41 +1467,6 @@ func (l *Library) pluginsView() []PluginView {
 	return out
 }
 
-// codexOwnEvent is a hook event as Codex's own: the library spells an agent's
-// own event "<agent>:<Event>", which is what keeps a hook from a Codex manifest
-// out of every other agent's files.
-func codexOwnEvent(ev string) string {
-	if strings.HasPrefix(ev, "codex:") {
-		return ev
-	}
-	// The portable events the two share keep their portable name here: a Codex
-	// manifest is Codex's, but its `Stop` is the same turn-end every agent has,
-	// and marking it codex-only would take it from Codex's own portable row.
-	for _, e := range []string{"turn-end", "after-tool", "before-tool", "prompt", "session-start"} {
-		if ev == e {
-			return "codex:" + codexEventName(e)
-		}
-	}
-	return "codex:" + ev
-}
-
-// codexEventName is the portable event's name in Codex's own spelling.
-func codexEventName(portable string) string {
-	switch portable {
-	case "turn-end":
-		return "Stop"
-	case "after-tool":
-		return "PostToolUse"
-	case "before-tool":
-		return "PreToolUse"
-	case "prompt":
-		return "UserPromptSubmit"
-	case "session-start":
-		return "SessionStart"
-	}
-	return portable
-}
-
 // claudeOwnKey is Claude Code's own spelling of an event, for the library's
 // "<agent>:<Event>" form.
 func claudeOwnKey(ev string) string {
@@ -1506,19 +1474,6 @@ func claudeOwnKey(ev string) string {
 		return ev
 	}
 	return "claude:" + ev
-}
-
-// hookEventFor is a portable event's name in an agent's own spelling, for the
-// "<agent>:<Event>" form an agent-own hook carries.
-func hookEventFor(portable, agentID string) string {
-	sp, _ := hookSpecOf(&Target{Agent: &agent.Agent{ID: agentID}})
-	if sp == nil {
-		return portable
-	}
-	if n, ok := sp.events[portable]; ok && n != "" {
-		return n
-	}
-	return portable
 }
 
 // pluginHookEnv runs a plugin's hook command with CLAUDE_PLUGIN_ROOT and

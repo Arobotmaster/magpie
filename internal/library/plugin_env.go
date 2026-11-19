@@ -178,7 +178,16 @@ func (l *Library) healPluginRefs() {
 	}
 	ours := func(b string) bool { return b != "" && l.plugin(b) != nil }
 	for _, h := range l.Hooks {
-		if h != nil && ours(h.Bundle) && strings.Contains(h.Command, "CLAUDE_PLUGIN_") {
+		if h == nil || !ours(h.Bundle) {
+			continue
+		}
+		// Older dual-manifest imports prefixed an already Claude-specific
+		// event a second time, so neither harness recognized the event.
+		owner, event, _ := strings.Cut(h.Event, ":")
+		if native, doubled := strings.CutPrefix(event, "claude:"); doubled && (owner == "claude" || owner == "codex") {
+			h.Event = owner + ":" + native
+		}
+		if strings.Contains(h.Command, "CLAUDE_PLUGIN_") {
 			h.Command = pluginSub(h.Bundle)(pluginEnvRefs(h.Command, h.Bundle))
 		}
 	}

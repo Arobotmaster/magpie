@@ -209,13 +209,7 @@ func ProjectSubagents(dir string, names, agents []string, options ...ProjectWrit
 		}
 		for _, n := range names {
 			keep := slices.DeleteFunc(slices.Clone(ids), func(id string) bool {
-				sp := projectSubagentSpec(p, id)
-				if sp == nil {
-					return false
-				}
-				if slices.ContainsFunc(p.nativeSubagents(id), func(r ProjectResource) bool {
-					return strings.EqualFold(r.Name, n) || r.Path == p.rel(sp.path(n))
-				}) {
+				if p.hasNativeSubagent(id, n) {
 					skipped = append(skipped, projectSkip(p, "subagent:"+n, n, id))
 					return true
 				}
@@ -233,6 +227,13 @@ func ProjectSubagents(dir string, names, agents []string, options ...ProjectWrit
 		return nil
 	}, options...)
 	return withProjectSkips(res, skipped), err
+}
+
+func (p *Project) hasNativeSubagent(id, name string) bool {
+	sp := projectSubagentSpec(p, id)
+	return sp != nil && slices.ContainsFunc(p.nativeSubagents(id), func(r ProjectResource) bool {
+		return strings.EqualFold(r.Name, name) || r.Path == p.rel(sp.path(name))
+	})
 }
 
 // renameProjectSubagents has the projects give a subagent its new name.
