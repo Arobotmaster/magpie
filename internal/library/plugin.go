@@ -1368,6 +1368,8 @@ func RemovePlugin(name string) (*Result, error) {
 	})
 	if err == nil {
 		os.RemoveAll(pluginDir(name))
+		// its marketplace holds a copy of it beside the install record
+		os.RemoveAll(pluginMarketplaceDir(name))
 	}
 	return res, err
 }
@@ -1406,6 +1408,9 @@ func UpdatePlugin(name string) (*Result, error) {
 // PluginView is a plugin as the page shows it.
 type PluginView struct {
 	*Plugin
+	// Install is whether an agent has this plugin INSTALLED, which is a
+	// different fact from its parts being written (plugin_installed.go).
+	Install *PluginInstallState `json:"install,omitempty"`
 	// Missing are parts the user took out one by one since
 	Missing []string `json:"missing,omitempty"`
 	Dir     string   `json:"dir"`
@@ -1415,6 +1420,10 @@ func (l *Library) pluginsView() []PluginView {
 	out := []PluginView{}
 	for _, b := range l.Plugins {
 		v := PluginView{Plugin: b, Dir: pluginDir(b.Name)}
+		st := PluginInstall(b.Name)
+		if len(b.Manifests) > 0 || st.Installed {
+			v.Install = &st
+		}
 		// the parts the user took out one by one aren't listed as its
 		c := *b
 		c.Skills = slices.DeleteFunc(slices.Clone(b.Skills), func(n string) bool {

@@ -359,9 +359,11 @@ func fetchPlugins(in []*CarriedPlugin, res *Result) {
 	}
 }
 
-// removePluginDirs takes the folders of the plugins Put took out.
+// removePluginDirs takes the folders of the plugins Put took out, and the
+// marketplaces that hold a copy of them.
 func removePluginDirs(names []string) {
 	for _, n := range names {
 		os.RemoveAll(pluginDir(n))
+		os.RemoveAll(pluginMarketplaceDir(n))
 	}
 }

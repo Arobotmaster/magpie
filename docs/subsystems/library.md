@@ -59,6 +59,16 @@ bundle. In a dual-manifest bundle the manifest's own hook handlers
 belong to the tool that declared them. Shared parts use the existing
 Library assignment and source tracking. See [bundle import](../../internal/library/plugin.go).
 
+### Native plugin installation
+
+Library components and a tool's own plugin install are recorded separately.
+The API reads Claude Code's native installation registry, including which project
+a local install belongs to. An explicit installation uses Claude Code's own
+installer. Its temporary marketplace keeps a copy of the bundle so module
+paths resolve inside it. The Library cleans up its marketplace when it removes
+the bundle. See [native installation](../../internal/library/plugin_install.go)
+and [install status](../../internal/library/plugin_installed.go).
+
 ## Runtime path
 
 1. **Edit.** The Library page or `magpie library` calls an exported function such as `SaveServer`, `ServerAgents`, `InstallSkills`, `SkillAgents` or `SetSkillHow`. The skills and servers pages each have Select, Turn all on, Turn all off and Remove all; the heading shows Select (and a busy Checking…, Grouping… or Updating…) and keeps the rest under its ⋯, the app's row menu (`barMore` in plugins/library/client.js). Select's bar calls `SomeSkillsAgents` or `SomeServersAgents` (`/api/library/{skills,servers}/agents-some`), Turn all on or off calls `EverySkillAgents` or `EveryServerAgents` for the agents shown, and Remove all calls `RemoveSkills` or `RemoveServers`. The hooks page has Select and Remove all too (`SomeHooksAgents`, `RemoveHooks`). Each of these is one change that takes every item out as a single removal would (#1027). Select's bar also has Remove… (#1852), which asks first, naming the count, and sends only the picked names to `RemoveSkills`, `RemoveServers` or `RemoveHooks`; ticking a group's or part's header picks all of it. A name that wasn't removed stays picked, with its error in its row's place (`pickErrs`), and the status names it; when every name fails the endpoint answers 400 and the sheet stays open. A row's agent chips start with All (`allChip` in `plugins/library/client.js`), which gives the item to every agent shown that can take it, or takes it from them all; the pickers that choose the agents before an item is added (installing skills from a repository or the market, adding, bringing in or installing a server) have the same All: most start with every agent lit, and one agent alone took a click on each of the others (#1531).
