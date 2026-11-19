@@ -130,6 +130,10 @@ func (l *Library) syncProjectHooks(p *Project, fail func(what string, err error)
 	// take away what is magpie's and no longer wanted
 	var kept []HookFile
 	for _, f := range p.HookFiles {
+		if !p.bundleChanges("hook", f.Name, f.Path) {
+			kept = append(kept, f)
+			continue
+		}
 		abs := filepath.Join(p.Dir, filepath.FromSlash(f.Path))
 		dst, err := p.file(abs)
 		if err != nil {
@@ -169,6 +173,11 @@ func (l *Library) syncProjectHooks(p *Project, fail func(what string, err error)
 
 	// add what belongs there and isn't yet
 	for _, rel := range slices.Sorted(maps.Keys(wanted)) {
+		if p.writes.bundleParts != nil && !slices.ContainsFunc(flattenHookWants(wanted[rel]), func(w projectHookWant) bool {
+			return p.bundleChanges("hook", w.h.Name, rel)
+		}) {
+			continue
+		}
 		id := projectHookAgentOf(rel)
 		abs := filepath.Join(p.Dir, filepath.FromSlash(rel))
 		dst, err := p.file(abs)
@@ -197,6 +206,9 @@ func (l *Library) syncProjectHooks(p *Project, fail func(what string, err error)
 			next := list
 			var added []HookFile
 			for _, w := range wanted[rel][ev] {
+				if !p.bundleChanges("hook", w.h.Name, rel) {
+					continue
+				}
 				hash := projectHookHash(w.entry)
 				if slices.ContainsFunc(kept, func(f HookFile) bool {
 					return f.Path == rel && f.Event == ev && f.Hash == hash && f.Name == w.h.Name
@@ -398,6 +410,7 @@ func ProjectHooks(dir string, names, agents []string, options ...ProjectWriteOpt
 			}
 		}
 		for _, n := range names {
+			p.forgetBundlePart("hook", n)
 			if p.Hooks == nil {
 				p.Hooks = map[string][]string{}
 			}

@@ -49,13 +49,15 @@ function tr(lang, key, vars = {}) {
 }
 
 function server(lang, state, posts) {
+  const view = () => ({ ...lib(state.plugins), projects: state.projects || [] });
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
     const json = (data) => route.fulfill({ json: data });
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:true};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang, theme: "light" } });
-    if (url.pathname === "/api/library") return json(lib(state.plugins));
+    if (url.pathname === "/api/library") return json(view());
+    if (url.pathname === "/api/library/projects/plugin-origins") return json([]);
     if (url.pathname.startsWith("/api/library/") && req.method() === "POST" && !url.pathname.endsWith("/reveal")) {
       const body = req.postDataJSON(), what = url.pathname.replace("/api/library/", "");
       posts.push({ what, body });
@@ -64,7 +66,12 @@ function server(lang, state, posts) {
       if (what === "plugins/on") state.plugins = state.plugins.map((x) => (x.name === body.name ? { ...x, off: !body.on } : x));
       if (what === "plugins/remove") state.plugins = state.plugins.filter((x) => x.name !== body.name);
       if (what === "plugins/install") state.plugins = [...state.plugins, { name: body.names[0], agents: body.agents, skills: ["x"] }];
-      return json({ ...lib(state.plugins), result: { changed: ["claude"] } });
+      if (what === "projects/bundle") {
+        if (body.preview) return json({ planId: body.on ? "add-plan" : "remove-plan", writes: [{ action: body.on ? "write" : "remove", path: body.dir + "/.codex/hooks.json" }],
+          skipped: [{ agent: "codex", what: "hook:native", error: "already supplied by the project" }] });
+        state.projects[0].bundles = body.on ? { [body.name]: body.agents } : {};
+      }
+      return json({ ...view(), result: { changed: ["claude"] } });
     }
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
     if (url.pathname === "/api/usage/quotas") return json([]);
@@ -111,6 +118,55 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     I18N = strings().I18N;
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" }));
     t.after(() => browser.close());
+
+    await t.test("project bundle preview and withdrawal", async () => {
+      const dir = HOME + "/project";
+      const state = { plugins: [PLUGIN], projects: [{ dir, name: "project", claudePlugins: {} }] };
+      const posts = [];
+      const ctx = await browser.newContext({ viewport: { width: 420, height: 900 }, reducedMotion: "reduce" });
+      try {
+        await ctx.addInitScript(() => { try { localStorage.setItem("magpie.libTab", "plugins"); } catch {} });
+        const page = await ctx.newPage();
+        page.setDefaultTimeout(5000);
+        await page.route("**/*", server("en", state, posts));
+        await page.goto("http://magpie.test/");
+        await page.locator('button[data-view="library"]').click();
+        const card = page.locator(".lib-project");
+        await card.locator(".lib-projhead").click();
+        const open = () => card.getByRole("button", { name: "Project bundles" }).click();
+        await open();
+        const modal = page.locator("#modal form");
+        const preview = modal.getByRole("button", { name: "Preview writes" });
+        const apply = modal.getByRole("button", { name: "Apply project writes" });
+        await modal.getByRole("checkbox", { name: "Claude Code" }).check();
+        await modal.getByRole("checkbox", { name: "Codex" }).check();
+        await preview.click();
+        await modal.getByText(/hook:native.*already supplied/).waitFor();
+        assert.equal(posts.length, 1);
+        await modal.getByRole("checkbox", { name: "Pi" }).check();
+        assert.equal(await apply.isDisabled(), true);
+        await preview.click();
+        await apply.click();
+        await modal.waitFor({ state: "hidden" });
+        await open();
+        await modal.getByLabel("Bundle action").selectOption("remove");
+        assert.equal(await modal.getByRole("checkbox", { name: "Pi" }).isChecked(), true);
+        await preview.click();
+        await apply.click();
+        await modal.waitFor({ state: "hidden" });
+        const add = { dir, name: PLUGIN.name, agents: ["claude", "codex", "pi"], on: true };
+        const remove = { ...add, on: false };
+        assert.deepEqual(posts, [
+          { what: "projects/bundle", body: { ...add, agents: ["claude", "codex"], preview: true } },
+          { what: "projects/bundle", body: { ...add, preview: true } },
+          { what: "projects/bundle", body: { ...add, planId: "add-plan" } },
+          { what: "projects/bundle", body: { ...remove, preview: true } },
+          { what: "projects/bundle", body: { ...remove, planId: "remove-plan" } },
+        ]);
+      } finally {
+        await ctx.close();
+      }
+    });
 
     for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) {
       await t.test(lang, async () => {

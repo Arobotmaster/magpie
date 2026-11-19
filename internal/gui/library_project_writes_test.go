@@ -108,3 +108,56 @@ func TestProjectWritesRoutePreview(t *testing.T) {
 		t.Fatalf("planned file wasn't written: %v", err)
 	}
 }
+
+func TestProjectBundleRouteUsesSharedPlan(t *testing.T) {
+	dir := piRouteProject(t)
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "package.json"), []byte(`{"name":"route-bundle","pi":{"extensions":["./example.ts"]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "example.ts"), []byte("export default function() {}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := library.InstallPlugins(source, nil, []string{"none"}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(Handler(&opens{}, nil))
+	t.Cleanup(server.Close)
+	post := func(on, preview bool, id string) *http.Response {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"dir": dir, "name": "route-bundle", "agents": []string{"pi"}, "on": on, "preview": preview, "planId": id,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := server.Client().Post(server.URL+"/api/library/projects/bundle", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { res.Body.Close() })
+		return res
+	}
+	if res := post(true, false, ""); res.StatusCode == http.StatusOK {
+		t.Fatal("apply without a preview was allowed")
+	}
+	settings := filepath.Join(dir, ".pi", "settings.json")
+	for _, on := range []bool{true, false} {
+		preview := post(on, true, "")
+		var plan library.Result
+		if preview.StatusCode != http.StatusOK || json.NewDecoder(preview.Body).Decode(&plan) != nil || plan.PlanID == "" || len(plan.Problems) != 0 {
+			t.Fatalf("preview on=%t: %d %+v", on, preview.StatusCode, plan)
+		}
+		if _, err := os.Stat(settings); !on && err != nil || on && !os.IsNotExist(err) {
+			t.Fatalf("preview changed the Pi settings: on=%t err=%v", on, err)
+		}
+		apply := post(on, false, plan.PlanID)
+		if apply.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(apply.Body)
+			t.Fatalf("apply on=%t: %d %s", on, apply.StatusCode, body)
+		}
+	}
+	if _, err := os.Stat(settings); !os.IsNotExist(err) {
+		t.Fatalf("withdraw did not remove the created settings: %v", err)
+	}
+}

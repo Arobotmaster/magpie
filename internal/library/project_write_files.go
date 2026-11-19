@@ -24,6 +24,20 @@ type projectFile struct {
 	check       func() error
 }
 
+func (f *projectFile) unchanged() error {
+	if err := f.check(); err != nil {
+		return err
+	}
+	if edit.HasHardLinks(f.path) {
+		return fmt.Errorf("%s is a hard-linked file", f.path)
+	}
+	b, err := os.ReadFile(f.path)
+	if (err == nil) != f.existed || err != nil && !errors.Is(err, os.ErrNotExist) || !bytes.Equal(b, f.before) {
+		return fmt.Errorf("%s changed after planning", f.path)
+	}
+	return nil
+}
+
 type projectWrite struct {
 	ProjectWrite
 	fingerprint string
@@ -37,14 +51,17 @@ type projectUndo struct {
 }
 
 type projectWrites struct {
-	dir     string
-	files   map[string]*projectFile
-	other   map[string]projectWrite
-	git     map[string]*projectGit
-	parts   projectParts
-	intent  string
-	skipped []Problem
-	verify  func() error
+	dir             string
+	files           map[string]*projectFile
+	other           map[string]projectWrite
+	git             map[string]*projectGit
+	parts           projectParts
+	intent          string
+	skipped         []Problem
+	verify          func() error
+	bundleParts     map[projectBundlePart]bool
+	bundleClaudeHub bool
+	bundleCodexHub  bool
 }
 
 func newProjectWrites() (*projectWrites, error) {
@@ -144,19 +161,7 @@ func (w *projectWrites) operations(state string) ([]projectWrite, error) {
 		out = append(out, projectWrite{
 			ProjectWrite: ProjectWrite{Path: f.path, Action: action},
 			fingerprint:  fmt.Sprintf("%t:%x:%x", f.existed, sha256.Sum256(f.before), sha256.Sum256(after)),
-			check: func() error {
-				if err := f.check(); err != nil {
-					return err
-				}
-				if edit.HasHardLinks(f.path) {
-					return fmt.Errorf("%s is a hard-linked file", f.path)
-				}
-				b, err := os.ReadFile(f.path)
-				if (err == nil) != f.existed || err != nil && !errors.Is(err, os.ErrNotExist) || !bytes.Equal(b, f.before) {
-					return fmt.Errorf("%s changed after planning", f.path)
-				}
-				return nil
-			},
+			check:        f.unchanged,
 			apply: func() (projectUndo, error) {
 				var err error
 				if exists {

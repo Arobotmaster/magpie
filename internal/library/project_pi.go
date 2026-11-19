@@ -173,6 +173,13 @@ func (l *Library) syncProjectPi(p *Project, fail func(what string, err error)) {
 	lists := map[string][]json.RawMessage{"package": conf.pkgs, "extension": conf.exts}
 	changed := false
 	var kept []PiEntry
+	relevant := func(kind, source string) bool {
+		if p.writes == nil || p.writes.bundleParts == nil {
+			return true
+		}
+		_, ok := p.writes.bundleParts[projectBundlePart{Kind: kind, Name: source, Agent: "pi"}]
+		return ok
+	}
 	for _, kind := range []string{"package", "extension"} {
 		cur := lists[kind]
 		wanted := p.Pi[kind]
@@ -180,6 +187,10 @@ func (l *Library) syncProjectPi(p *Project, fail func(what string, err error)) {
 		scopes := map[string]string{}
 		for _, e := range p.PiEntries {
 			if e.Kind == kind {
+				if !relevant(kind, e.Source) {
+					kept = append(kept, e)
+					continue
+				}
 				mine[e.Source] = e
 				scopes[e.Source] = e.Scope
 			}
@@ -256,6 +267,9 @@ func (l *Library) syncProjectPi(p *Project, fail func(what string, err error)) {
 			}
 		}
 		for _, src := range wanted {
+			if !relevant(kind, src) {
+				continue
+			}
 			if record := mine[src]; record.Adopted {
 				// The user removed or edited the declaration after adoption.
 				// Drop the assignment so it cannot be recreated or copied.
@@ -481,6 +495,7 @@ func ProjectPiChange(dir, kind string, sources []string, mode PiChange, options 
 		}
 		// which of them are turned off, kept beside the list
 		for _, src := range sources {
+			p.forgetBundlePart(kind, src)
 			i := slices.IndexFunc(p.PiEntries, func(e PiEntry) bool {
 				return e.Adopted && e.Kind == kind && e.Source == src
 			})

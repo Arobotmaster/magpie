@@ -280,7 +280,8 @@ To assign an imported bundle to a registered project, preview
 `magpie library project --plan bundle add <dir> <bundle> agents=claude,codex,pi`.
 Repeat the same command with `--plan-id=<id>` in place of `--plan` to verify
 and apply it. Add `--json` to get the plan ID, writes, skips and problems
-as JSON. [ProjectBundle](../../internal/library/project_bundle.go) adds the
+as JSON. The project plugin card has the same preview and apply through
+`POST /api/library/projects/bundle`. [ProjectBundle](../../internal/library/project_bundle.go) adds the
 bundle's skills, subagents, supported hooks and MCP servers to the existing
 Claude Code and Codex project assignments. Pi uses the package declaration
 described above. An unsupported part or a resource already supplied
@@ -291,10 +292,21 @@ An enabled native plugin with an installation in effect for the target
 project can supply the bundle for that agent. The
 [source check](../../internal/library/project_bundle_native.go) uses the
 native plugin's install path or marketplace entry together with its
-configuration. A shared name alone cannot match. Repeating the bundle
-command after enabling a native plugin removes the redundant project
-assignments for that agent through the existing ownership checks. The
-native plugin and user-wide library assignments stay in their own settings.
+configuration. A shared name alone cannot match. The Codex project writer
+still converts a Claude-format role to Codex's project role format when
+Codex loads the bundle natively. Repeating enablement after enabling a
+native plugin releases the tracked project assignments that plugin supplies.
+The native plugin and user-wide library assignments stay in their own settings.
 Existing project distribution switches still control sharing. When an
 affected linked worktree already loads a matching native plugin, the
 command reports the conflict before writing the bundle.
+
+Use `bundle remove` with the same project, bundle and selected agents to
+withdraw their assignments through the same plan. Ownership starts when
+the bundle adds an assignment. Existing single-item assignments and native
+configuration keep their ownership. When two bundles use the same tracked
+assignment, the last withdrawal can take away the unchanged resource.
+Explicit single-item edits supersede bundle ownership. Withdrawal leaves
+files and entries that the user modified. It also withdraws recorded
+copies from related worktrees that previously received the assignment.
+Old configuration without a bundle assignment record is preserved.

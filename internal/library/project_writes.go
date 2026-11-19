@@ -227,6 +227,15 @@ func (l *Library) writeProject(dir string, parts projectParts, change func(*Libr
 			return res, err
 		}
 	}
+	// An untouched staged file can still establish ownership of a shared
+	// bundle resource. Check it before saving the new ownership record.
+	if w.bundleParts != nil {
+		for _, f := range w.files {
+			if err := f.unchanged(); err != nil {
+				return res, err
+			}
+		}
+	}
 	var journal []projectUndo
 	rollback := func(cause error) error {
 		for i := len(journal) - 1; i >= 0; i-- {

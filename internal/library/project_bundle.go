@@ -10,9 +10,18 @@ import (
 // ProjectBundle adds the supported parts of a library bundle to one project.
 // It uses the same assignment maps and writers as the single-item commands.
 func ProjectBundle(dir, name string, agents []string, options ...ProjectWriteOptions) (*Result, error) {
+	return changeProjectBundle(dir, name, agents, true, options...)
+}
+
+// RemoveProjectBundle releases the assignments introduced by this bundle.
+func RemoveProjectBundle(dir, name string, agents []string, options ...ProjectWriteOptions) (*Result, error) {
+	return changeProjectBundle(dir, name, agents, false, options...)
+}
+
+func changeProjectBundle(dir, name string, agents []string, on bool, options ...ProjectWriteOptions) (*Result, error) {
 	ids := slices.Compact(slices.Sorted(slices.Values(agents)))
-	if len(ids) == 0 {
-		return nil, errors.New("name the agents for the project bundle")
+	if name == "" || len(ids) == 0 {
+		return nil, errors.New("name the project bundle and its agents")
 	}
 	for _, id := range ids {
 		if id != "claude" && id != "codex" && id != "pi" {
@@ -24,6 +33,20 @@ func ProjectBundle(dir, name string, agents []string, options ...ProjectWriteOpt
 		if p == nil {
 			return fmt.Errorf("no project %s", dir)
 		}
+		w := p.writes
+		w.bundleParts = map[projectBundlePart]bool{}
+		w.intent = fmt.Sprintf("bundle %t %q %q %q", on, dir, name, ids)
+		beforeHubs := l.projectHubs(p)
+		defer func() {
+			if w.parts&projectServers != 0 {
+				afterHubs := l.projectHubs(p)
+				w.bundleClaudeHub = (beforeHubs["claude"] == nil) != (afterHubs["claude"] == nil)
+				w.bundleCodexHub = (beforeHubs["codex"] == nil) != (afterHubs["codex"] == nil)
+			}
+		}()
+		if !on {
+			return p.withdrawBundle(name, ids, nil)
+		}
 		b := l.plugin(name)
 		if b == nil {
 			return fmt.Errorf("no library bundle %q", name)
@@ -31,8 +54,7 @@ func ProjectBundle(dir, name string, agents []string, options ...ProjectWriteOpt
 		if b.Pending || !isDir(pluginDir(b.Name)) {
 			return fmt.Errorf("library bundle %q is not available on this machine", name)
 		}
-		w := p.writes
-		w.intent = fmt.Sprintf("bundle add %q %q %q %q %q %q", dir, name, ids, b.Source, b.Version, b.Installed)
+		w.intent += fmt.Sprintf(" %q %q %q", b.Source, b.Version, b.Installed)
 		for _, left := range b.Left {
 			w.skipped = append(w.skipped, Problem{Agent: dir, What: left.What, Error: left.Why})
 		}
@@ -58,21 +80,25 @@ func ProjectBundle(dir, name string, agents []string, options ...ProjectWriteOpt
 					return err
 				}
 				w.skipped = append(w.skipped, skipped...)
-				w.parts |= projectPi
 				continue
 			}
 			if native[i] != "" {
 				w.skipped = append(w.skipped, Problem{
 					Agent: id, What: "bundle:" + b.Name, Error: "already supplied by enabled native plugin " + native[i],
 				})
+				if err := p.withdrawBundle(name, []string{id}, func(part projectBundlePart) bool {
+					return nativeBundleSupplies(id, part.Kind)
+				}); err != nil {
+					return err
+				}
 			}
 			if err := l.assignProjectBundle(p, b, id, native[i] != ""); err != nil {
 				return err
 			}
 		}
 		var distributed []string
-		for i, id := range ids {
-			if native[i] == "" && p.distributesBundleTo(b, id) {
+		for _, id := range ids {
+			if p.distributesBundleTo(id) {
 				distributed = append(distributed, id)
 			}
 		}
@@ -90,11 +116,20 @@ func ProjectBundle(dir, name string, agents []string, options ...ProjectWriteOpt
 	}, options...)
 }
 
-func (p *Project) distributesBundleTo(b *Plugin, id string) bool {
-	return p.Distribution.Skills && p.writes.parts&projectSkills != 0 &&
-		slices.ContainsFunc(b.Skills, func(n string) bool { return slices.Contains(p.Skills[n], id) }) ||
-		p.Distribution.Subagents && p.writes.parts&projectRoles != 0 &&
-			slices.ContainsFunc(b.Subagents, func(n string) bool { return slices.Contains(p.Subagents[n], id) })
+// Codex's plugin loader supplies skills, MCP and hooks. It does not load the
+// bundle's Claude-format role, which the project writer converts to TOML.
+func nativeBundleSupplies(id, kind string) bool {
+	return id == "claude" || id == "codex" && kind != "subagent"
+}
+
+func (p *Project) distributesBundleTo(id string) bool {
+	for part, add := range p.writes.bundleParts {
+		if add && part.Agent == id && nativeBundleSupplies(id, part.Kind) &&
+			(part.Kind == "skill" && p.Distribution.Skills || part.Kind == "subagent" && p.Distribution.Subagents) {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *Library) checkBundleWorktrees(p *Project, b *Plugin, ids []string) error {
@@ -122,29 +157,17 @@ func (l *Library) assignProjectBundle(p *Project, b *Plugin, id string, native b
 	groups := []struct {
 		kind  string
 		names []string
-		set   *map[string][]string
-		part  projectParts
 	}{
-		{"skill", b.Skills, &p.Skills, projectSkills},
-		{"subagent", b.Subagents, &p.Subagents, projectRoles},
-		{"mcp", b.MCP, &p.Servers, projectServers},
-		{"hook", b.Hooks, &p.Hooks, projectHooks},
+		{"skill", b.Skills}, {"subagent", b.Subagents}, {"mcp", b.MCP}, {"hook", b.Hooks},
 	}
 	for _, g := range groups {
+		if native && nativeBundleSupplies(id, g.kind) {
+			continue
+		}
 		for _, name := range g.names {
-			before := (*g.set)[name]
-			if native {
-				// Keep assignments for all other agents, including those
-				// sharing this project with an enabled native plugin.
-				if slices.Contains(before, id) {
-					after := set(before, id, false)
-					if len(after) == 0 {
-						delete(*g.set, name)
-					} else {
-						(*g.set)[name] = after
-					}
-					p.writes.parts |= g.part
-				}
+			part := projectBundlePart{Kind: g.kind, Name: name, Agent: id}
+			if p.bundlePartAssigned(part) {
+				p.shareBundlePart(b.Name, part)
 				continue
 			}
 			why, err := l.projectBundlePart(p, b.Name, g.kind, name, id)
@@ -155,11 +178,10 @@ func (l *Library) assignProjectBundle(p *Project, b *Plugin, id string, native b
 				p.writes.skipped = append(p.writes.skipped, Problem{Agent: id, What: g.kind + ":" + name, Error: why})
 				continue
 			}
-			if *g.set == nil {
-				*g.set = map[string][]string{}
+			if g.kind == "hook" && p.shareBundleHook(b.Name, part, l.hook(name)) {
+				continue
 			}
-			(*g.set)[name] = set(before, id, true)
-			p.writes.parts |= g.part
+			p.assignBundlePart(b.Name, part)
 		}
 	}
 	return nil

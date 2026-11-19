@@ -17,7 +17,9 @@ import (
 // skills there, as the project's own: each is placed in the folder the
 // agent reads a project's skills from, and kept out of git.
 type Project struct {
-	Dir string `json:"dir"`
+	Dir               string                    `json:"dir"`
+	BundleAssignments []projectBundleAssignment `json:"bundleAssignments,omitempty"`
+	BundleHubHashes   map[string]string         `json:"bundleHubHashes,omitempty"`
 	// Distribution is opt-in for each category in this project's worktrees.
 	Distribution ProjectDistribution `json:"distribution,omitzero"`
 	writes       *projectWrites
@@ -188,11 +190,11 @@ func (l *Library) syncProject(p *Project, res *Result, parts projectParts) {
 	if parts&projectServers != 0 {
 		hubs = l.projectHubs(p)
 	}
-	if parts&projectSkills != 0 {
+	if parts&projectSkills != 0 && p.writes.bundleParts == nil {
 		p.syncSkillLinks(!p.removeAfter, res)
 	}
 	l.syncFolder(p, res, hubs, parts)
-	if parts&projectServers != 0 {
+	if parts&projectServers != 0 && (p.writes.bundleParts == nil || p.writes.bundleClaudeHub) {
 		l.syncClaudeLocal(p, hubs["claude"], func(what string, err error) {
 			res.fail(p.Dir, "project:"+what, err)
 		})
@@ -214,7 +216,9 @@ func (l *Library) syncFolder(p *Project, res *Result, hubs map[string]*Server, p
 	}
 	if parts&projectSkills != 0 {
 		l.syncProjectSkills(p, fail)
-		l.syncSkillsOff(p, fail)
+		if p.writes.bundleParts == nil {
+			l.syncSkillsOff(p, fail)
+		}
 	}
 	if parts&projectServers != 0 {
 		l.syncProjectMCP(p, hubs, fail)
@@ -257,6 +261,10 @@ func (l *Library) syncProjectSkills(p *Project, fail func(string, error)) {
 	}
 	var placed []string
 	for _, e := range p.Placed {
+		if !p.bundleChanges("skill", filepath.Base(e), e) {
+			placed = append(placed, e)
+			continue
+		}
 		if _, ok := want[e]; ok {
 			continue
 		}
@@ -265,6 +273,9 @@ func (l *Library) syncProjectSkills(p *Project, fail func(string, error)) {
 			continue // gone, or the user's own by now: forgotten, left as it is
 		}
 		if err := p.planSkill(abs, name, false, true); err != nil {
+			if p.writes.bundleParts != nil && (errors.Is(err, errProjectSkillEdited) || errors.Is(err, errForeign)) {
+				continue
+			}
 			fail(name, err)
 			placed = append(placed, e)
 		}
@@ -285,6 +296,9 @@ func (l *Library) syncProjectSkills(p *Project, fail func(string, error)) {
 	}
 	for _, e := range entries {
 		name := want[e]
+		if !p.bundleChanges("skill", name, e) {
+			continue
+		}
 		dir := filepath.ToSlash(filepath.Dir(e))
 		if p.SkillLinks[e] != "" || nativeSkill(native[dir], name) {
 			fail(name, fmt.Errorf("%w %s (%s)", errProjectAlreadyHas, name, dir))
@@ -614,6 +628,7 @@ func ProjectSkills(dir string, names, agents []string, options ...ProjectWriteOp
 			}
 		}
 		for _, name := range names {
+			p.forgetBundlePart("skill", name)
 			keep := slices.DeleteFunc(slices.Clone(ids), func(id string) bool {
 				if path := ProjectSkillsDir(id); p.nativeSkillAt(native, path, name) {
 					skipped = append(skipped, projectSkip(p, name, name, path))
@@ -650,6 +665,7 @@ func ProjectCopy(dir string, copy bool, options ...ProjectWriteOptions) (*Result
 
 // ProjectView is a project as the page shows it.
 type ProjectView struct {
+	Bundles      map[string][]string          `json:"bundles,omitempty"`
 	Native       map[string][]ProjectResource `json:"native,omitempty"`
 	SkillLinks   map[string]string            `json:"skillLinks,omitempty"`
 	Distribution ProjectDistribution          `json:"distribution"`
@@ -708,6 +724,12 @@ func projectViews(l *Library, problems []Problem) []ProjectView {
 	for _, p := range l.Projects {
 		v := ProjectView{Dir: p.Dir, Name: filepath.Base(p.Dir), Copy: p.Copy, Distribution: p.Distribution, Skills: map[string][]string{}, Placed: append([]string{}, p.Placed...)}
 		v.Native = p.nativeResources()
+		for _, a := range p.BundleAssignments {
+			if v.Bundles == nil {
+				v.Bundles = map[string][]string{}
+			}
+			v.Bundles[a.Bundle] = set(v.Bundles[a.Bundle], a.Agent, true)
+		}
 		v.SkillLinks = maps.Clone(p.SkillLinks)
 		for k, a := range p.Skills {
 			v.Skills[k] = append([]string{}, a...)

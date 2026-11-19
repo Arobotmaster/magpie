@@ -162,6 +162,7 @@ func ProjectPiScope(dir, kind, source, scope string, options ...ProjectWriteOpti
 		if !found {
 			return fmt.Errorf("%s has no Pi %s %s that magpie wrote yet: sync first (magpie library sync)", dir, kind, source)
 		}
+		p.forgetBundlePart(kind, source)
 		return nil
 	}, options...)
 }

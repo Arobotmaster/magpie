@@ -62,4 +62,16 @@ func TestLibraryProjectBundlePlanAndApply(t *testing.T) {
 	if _, err := projectOut(t, append([]string{"--plan-id=" + plan.PlanID}, args...)...); err == nil || !strings.Contains(err.Error(), "plan changed") {
 		t.Fatalf("the applied plan ID should now be stale: %v", err)
 	}
+	args[1] = "remove"
+	out, err = projectOut(t, append([]string{"--plan"}, args...)...)
+	if err != nil || json.Unmarshal([]byte(out), &plan) != nil || len(plan.Writes) == 0 ||
+		!linkTo(t, filepath.Join(project, ".agents/skills/runbook"), "runbook") {
+		t.Fatalf("withdraw preview: %s %v", out, err)
+	}
+	if out, err := projectOut(t, append([]string{"--plan-id=" + plan.PlanID}, args...)...); err != nil {
+		t.Fatalf("withdraw: %s %v", out, err)
+	}
+	if _, err := os.Lstat(filepath.Join(project, ".agents/skills/runbook")); !os.IsNotExist(err) {
+		t.Fatalf("the withdrawal left the assigned skill: %v", err)
+	}
 }

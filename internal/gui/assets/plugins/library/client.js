@@ -7054,7 +7054,7 @@ magpie.plugin("library", (ctx) => {
 
   function renderProjects(body, kind) {
     const rh = el("div", "row-head");
-    rh.append(el("h2", "label", kind === "skills" ? t("Project skills") : kind === "subagents" ? t("Project subagents") : kind === "instructions" ? t("Project instructions") : kind === "hooks" ? t("Project hooks") : kind === "pi" ? t("Project Pi") : kind === "plugins" ? t("Project Claude plugins") : t("Project servers")), el("span", "grow"));
+    rh.append(el("h2", "label", kind === "skills" ? t("Project skills") : kind === "subagents" ? t("Project subagents") : kind === "instructions" ? t("Project instructions") : kind === "hooks" ? t("Project hooks") : kind === "pi" ? t("Project Pi") : kind === "plugins" ? t("Project plugins") : t("Project servers")), el("span", "grow"));
     if (kind === "skills") rh.append(button(t("Sync all agents and projects"), "action lib-updall", () => change("all/sync", {})));
     if (!addingProject) rh.append(button(t("Add a project"), "action lib-updall", () => { addingProject = { dir: "" }; render(); }));
     body.append(rh);
@@ -7139,7 +7139,7 @@ magpie.plugin("library", (ctx) => {
     src.append(pathLink(p.dir));
     who.append(src);
     const piNames = [...new Set((p.piEntries || []).map((e) => e.source))];
-    const cpNames = Object.keys(p.claudePlugins || {}).sort();
+    const cpNames = [...new Set([...Object.keys(p.claudePlugins || {}), ...Object.keys(p.bundles || {})])].sort();
     const names = pv ? piNames.sort() : cp ? cpNames : Object.keys((sub ? p.subagents : hk ? p.hooks : mcp ? p.servers : p.skills) || {}).sort();
     const nativeKind = ins ? "instructions" : mcp ? "servers" : sub ? "subagents" : hk ? "hooks" : pv ? "pi" : cp ? "" : "skills";
     const hasNative = Boolean(p.native?.[nativeKind]?.length);
@@ -7638,10 +7638,13 @@ magpie.plugin("library", (ctx) => {
     return card;
   }
 
-  // The project's card, open on the Claude plugins tab: what it turns on
-  // or off in its own .claude/settings.local.json. The plugin itself is
-  // installed by Claude Code's own CLI.
+  // Bundle assignment and the project's native plugin switches share the card.
   function projectClaudePlugins(p, card) {
+    if (!p.missing && ((lib.plugins || []).some((b) => !b.pending) || Object.keys(p.bundles || {}).length)) {
+      const actions = el("div", "lib-aside lib-projfoot");
+      actions.append(button(t("Project bundles"), "action", () => projectBundles(p)));
+      card.append(actions);
+    }
     const sources = el("div");
     const notice = el("div", "lib-aside lib-projfoot", t("Reading plugin sources…"));
     notice.setAttribute("aria-live", "polite");
@@ -7779,19 +7782,8 @@ magpie.plugin("library", (ctx) => {
   }
 
   function projectWrites(p) {
-    const form = el("form", "editor lib-editor");
-    form.action = "/api/library/projects/apply";
-    form.method = "post";
-    const title = el("b", "", t("Project writes"));
-    title.id = "lib-project-write-title";
-    form.setAttribute("aria-labelledby", title.id);
-    const head = el("div", "ehead");
-    head.append(glyph(GLYPH.folder), title);
-    form.append(head, el("p", "lib-confirm", p.dir));
-
     const group = el("fieldset", "lib-write-scope");
     group.append(el("legend", "", t("Share with related Git worktrees")));
-    const actions = { mkdir: t("Create directory"), write: t("Write"), remove: t("Remove"), copy: t("Copy"), link: t("Link"), rmdir: t("Remove directory") };
     const categories = [["skills", t("Skills")], ["subagents", t("Subagents")], ["instructions", t("Instructions")]];
     for (const [name, label] of categories) {
       const box = el("input");
@@ -7802,6 +7794,87 @@ magpie.plugin("library", (ctx) => {
       row.append(box, el("span", "name", label));
       group.append(row);
     }
+    projectWriteForm(p, t("Project writes"), "projects/apply", group, (values) => {
+      const distribution = Object.fromEntries(categories.map(([name]) => [name, values.has(name)]));
+      const changed = categories.some(([name]) => distribution[name] !== !!p.distribution?.[name]);
+      return changed
+        ? { path: "projects/distribution", body: { dir: p.dir, distribution }, changed }
+        : { path: "projects/apply", body: { dir: p.dir } };
+    });
+  }
+
+  function projectBundles(p) {
+    const group = el("fieldset", "lib-write-scope");
+    const select = el("select");
+    select.name = "name";
+    const action = el("select");
+    action.name = "action";
+    for (const [value, label] of [["add", t("Enable bundle")], ["remove", t("Withdraw bundle")]]) {
+      const option = el("option", "", label);
+      option.value = value;
+      action.append(option);
+    }
+    const available = (lib.plugins || []).filter((b) => !b.pending).map((b) => b.name).sort();
+    const boxes = [];
+    function choices() {
+      const removing = action.value === "remove";
+      const previous = select.value;
+      const names = removing ? Object.keys(p.bundles || {}).sort() : available;
+      select.replaceChildren(...names.map((name) => {
+        const option = el("option", "", name);
+        option.value = name;
+        return option;
+      }));
+      if (names.includes(previous)) select.value = previous;
+      targets();
+    }
+    function targets() {
+      const assigned = p.bundles?.[select.value] || [];
+      for (const box of boxes) {
+        box.disabled = !select.value || (action.value === "remove" && !assigned.includes(box.value));
+        box.checked = !box.disabled && assigned.includes(box.value);
+      }
+    }
+    action.options[0].disabled = !available.length;
+    action.options[1].disabled = !Object.keys(p.bundles || {}).length;
+    if (!available.length) action.value = "remove";
+    const operation = el("label", "lib-pick");
+    operation.append(el("span", "name", t("Bundle action")), action);
+    const bundle = el("label", "lib-pick");
+    bundle.append(el("span", "name", t("Library bundle")), select);
+    group.append(operation, bundle);
+    for (const [id, label] of [["claude", "Claude Code"], ["codex", "Codex"], ["pi", "Pi"]]) {
+      const box = el("input");
+      box.type = "checkbox";
+      box.name = "agents";
+      box.value = id;
+      boxes.push(box);
+      const row = el("label", "lib-pick");
+      row.append(box, el("span", "name", label));
+      group.append(row);
+    }
+    action.onchange = choices;
+    select.onchange = targets;
+    choices();
+    projectWriteForm(p, t("Project bundles"), "projects/bundle", group, (values) => {
+      const agents = values.getAll("agents");
+      if (!select.value || !agents.length) throw new Error(t("Choose a bundle and at least one agent"));
+      return { path: "projects/bundle", body: { dir: p.dir, name: select.value, agents, on: action.value === "add" } };
+    });
+  }
+
+  function projectWriteForm(p, label, initialPath, group, request) {
+    const form = el("form", "editor lib-editor");
+    form.action = "/api/library/" + initialPath;
+    form.method = "post";
+    const title = el("b", "", label);
+    title.id = "lib-project-write-title";
+    form.setAttribute("aria-labelledby", title.id);
+    const head = el("div", "ehead");
+    head.append(glyph(GLYPH.folder), title);
+    form.append(head, el("p", "lib-confirm", p.dir));
+
+    const actions = { mkdir: t("Create directory"), write: t("Write"), remove: t("Remove"), copy: t("Copy"), link: t("Link"), rmdir: t("Remove directory") };
     const results = el("div", "lib-write-plan");
     results.setAttribute("role", "status");
     let previewed;
@@ -7827,14 +7900,10 @@ magpie.plugin("library", (ctx) => {
     form.onsubmit = async (ev) => {
       ev.preventDefault();
       reset();
-      const values = new FormData(form);
-      const distribution = Object.fromEntries(categories.map(([name]) => [name, values.has(name)]));
-      const changed = categories.some(([name]) => distribution[name] !== !!p.distribution?.[name]);
-      const path = changed ? "projects/distribution" : "projects/apply";
-      const body = changed ? { dir: p.dir, distribution } : { dir: p.dir };
-      form.action = "/api/library/" + path;
-      preview.disabled = group.disabled = true;
       try {
+        const { path, body, changed } = request(new FormData(form));
+        form.action = "/api/library/" + path;
+        preview.disabled = group.disabled = true;
         const plan = await api("library/" + path, { ...body, preview: true });
         const lines = (plan.writes || []).flatMap((write) => [
           t("{action} {path}", { action: actions[write.action] || write.action, path: write.path }),
@@ -7846,9 +7915,12 @@ magpie.plugin("library", (ctx) => {
           for (const line of lines) list.append(el("li", "", line));
           results.append(list);
         }
+        for (const skip of plan.skipped || []) results.append(el("p", "lib-aside", t("{agent}: {error}", {
+          agent: tilde(nameOf(skip.agent)), error: skip.what + " · " + skip.error,
+        })));
         for (const problem of plan.problems || []) results.append(el("p", "lib-err", problem.error));
         previewed = { path, body, id: plan.planId };
-        apply.disabled = !previewed.id || (!changed && !lines.length);
+        apply.disabled = !previewed.id || (!changed && !lines.length) || (path === "projects/bundle" && !!plan.problems?.length);
       } catch (e) {
         results.append(el("p", "lib-err", e.message));
       } finally {

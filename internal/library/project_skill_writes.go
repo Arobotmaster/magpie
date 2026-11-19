@@ -98,6 +98,8 @@ func (p *Project) planSkill(abs, name string, asCopy, remove bool) error {
 // A copy's marker establishes ownership only while its files still match
 // the hash originally written there. Older markers with no hash can never
 // establish permission to replace or remove a directory.
+var errProjectSkillEdited = errors.New("is a skill copy changed outside magpie")
+
 func projectSkillState(path, name string) (string, error) {
 	fi, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -130,7 +132,7 @@ func projectSkillState(path, name string) (string, error) {
 	written, ok := markedHash(path)
 	current := hashDir(path)
 	if !ok || current == "" || written != current {
-		return "", fmt.Errorf("%s is a skill copy changed outside magpie", path)
+		return "", fmt.Errorf("%s %w", path, errProjectSkillEdited)
 	}
 	return "copy:" + current, nil
 }

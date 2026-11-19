@@ -18,7 +18,7 @@ const libraryProjectUsage = `magpie library project [--json]      the projects (
   magpie library project --plan-id=<id> <mutation…>   apply the command after checking its preview
   magpie library project plan <dir> [--json]      preview the project's pending writes
   magpie library project apply <dir> [--plan-id=<id>]   write the project's saved assignments
-  magpie library project bundle add <dir> <bundle> agents=claude,codex,pi [--json]
+  magpie library project bundle add|remove <dir> <bundle> agents=claude,codex,pi [--json]
                                      give the project the bundle's supported library resources
   magpie library project distribute <dir> skills|subagents|instructions on|off [--plan]
                                      choose which category goes to related Git worktrees
@@ -217,7 +217,7 @@ func projectBundleCmd(args []string, usage func() error, options library.Project
 	if asJSON {
 		args = args[:4]
 	}
-	if len(args) != 4 || args[0] != "add" || strings.HasPrefix(args[1], "-") || strings.HasPrefix(args[2], "-") {
+	if len(args) != 4 || (args[0] != "add" && args[0] != "remove") || strings.HasPrefix(args[1], "-") || strings.HasPrefix(args[2], "-") {
 		return usage()
 	}
 	agents, ok := strings.CutPrefix(args[3], "agents=")
@@ -228,7 +228,11 @@ func projectBundleCmd(args []string, usage func() error, options library.Project
 	if err != nil {
 		return err
 	}
-	res, err := library.ProjectBundle(dir, args[2], strings.Split(agents, ","), options)
+	apply := library.ProjectBundle
+	if args[0] == "remove" {
+		apply = library.RemoveProjectBundle
+	}
+	res, err := apply(dir, args[2], strings.Split(agents, ","), options)
 	if err != nil {
 		return err
 	}

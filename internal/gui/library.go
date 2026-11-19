@@ -956,6 +956,14 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			res, err = library.InstallMarketSkill(in.Source, in.ID, in.Agents)
 		case "projects/plan":
 			res, err = library.ProjectPlan(in.Dir)
+		case "projects/bundle":
+			if !in.Preview && in.PlanID == "" {
+				err = errors.New("preview the project bundle before applying it")
+			} else if in.On {
+				res, err = library.ProjectBundle(in.Dir, in.Name, in.Agents, projectOptions)
+			} else {
+				res, err = library.RemoveProjectBundle(in.Dir, in.Name, in.Agents, projectOptions)
+			}
 		case "projects/apply":
 			res, err = library.ProjectApply(in.Dir, projectOptions)
 		case "projects/distribution":

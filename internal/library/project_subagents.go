@@ -95,6 +95,10 @@ func (l *Library) syncProjectSubagents(p *Project, fail func(what string, err er
 	var kept []SubagentFile
 	done := map[string]bool{}
 	for _, f := range p.AgentFiles {
+		if !p.bundleChanges("subagent", f.Name, f.Path) {
+			kept = append(kept, f)
+			continue
+		}
 		abs := filepath.Join(p.Dir, filepath.FromSlash(f.Path))
 		dst, err := p.file(abs)
 		if err != nil {
@@ -113,7 +117,9 @@ func (l *Library) syncProjectSubagents(p *Project, fail func(what string, err er
 			done[f.Path] = true
 			continue
 		case subagentHash(cur) != f.Hash:
-			fail("subagent:"+f.Name, fmt.Errorf("%s changed outside magpie", f.Path))
+			if p.writes.bundleParts == nil {
+				fail("subagent:"+f.Name, fmt.Errorf("%s changed outside magpie", f.Path))
+			}
 			done[f.Path] = true
 			continue
 		}
@@ -147,6 +153,9 @@ func (l *Library) syncProjectSubagents(p *Project, fail func(what string, err er
 			continue
 		}
 		w := wanted[rel]
+		if !p.bundleChanges("subagent", w.s.Name, rel) {
+			continue
+		}
 		abs := filepath.Join(p.Dir, filepath.FromSlash(rel))
 		dst, err := p.file(abs)
 		if err != nil {
@@ -208,6 +217,7 @@ func ProjectSubagents(dir string, names, agents []string, options ...ProjectWrit
 			ids = set(ids, id, true)
 		}
 		for _, n := range names {
+			p.forgetBundlePart("subagent", n)
 			keep := slices.DeleteFunc(slices.Clone(ids), func(id string) bool {
 				if p.hasNativeSubagent(id, n) {
 					skipped = append(skipped, projectSkip(p, "subagent:"+n, n, id))

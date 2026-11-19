@@ -129,9 +129,13 @@ func TestProjectBundleUsesEffectiveNativeSource(t *testing.T) {
 
 	ids := []string{"claude", "codex"}
 	native := ok(t)(ProjectBundle(project, "workbench", ids))
-	if len(native.Writes) != 0 || len(native.Skipped) != 2 {
-		t.Fatalf("same-source native bundle should satisfy both targets: %+v", native)
+	role := filepath.Join(project, ".codex/agents/analyst.toml")
+	if !writesPath(native, role) || len(native.Skipped) != 2 {
+		t.Fatalf("same-source native plugin should leave Codex role conversion available: %+v", native)
 	}
+	gone(t, filepath.Join(project, ".claude/agents/analyst.md"))
+	gone(t, filepath.Join(project, ".codex/hooks.json"))
+	gone(t, filepath.Join(project, ".mcp.json"))
 	gone(t, filepath.Join(project, ".claude/skills/triage"))
 	gone(t, filepath.Join(project, ".agents/skills/triage"))
 	if read(t, codexUserFile) != codexUser || read(t, claudeSettings()) != claudeFlags {
@@ -142,8 +146,13 @@ func TestProjectBundleUsesEffectiveNativeSource(t *testing.T) {
 		t.Fatal("the single-item assignment must exist before deduplicating it")
 	}
 	ok(t)(ProjectBundle(project, "workbench", ids))
-	gone(t, filepath.Join(project, ".claude/skills/triage"))
-	gone(t, filepath.Join(project, ".agents/skills/triage"))
+	ok(t)(RemoveProjectBundle(project, "workbench", ids))
+	gone(t, role)
+	for _, rel := range []string{".claude/skills/triage/SKILL.md", ".agents/skills/triage/SKILL.md"} {
+		if read(t, filepath.Join(project, rel)) == "" {
+			t.Fatalf("pre-existing single assignment %s was lost", rel)
+		}
+	}
 	if read(t, codexUserFile) != codexUser || read(t, claudeSettings()) != claudeFlags {
 		t.Fatal("deduplicating the prior assignment rewrote native settings")
 	}
@@ -172,5 +181,154 @@ func TestProjectBundleUsesEffectiveNativeSource(t *testing.T) {
 	}
 	if read(t, filepath.Join(other, ".agents/skills/triage/SKILL.md")) == "" {
 		t.Fatal("same name from another marketplace suppressed the library skill")
+	}
+}
+
+func TestProjectBundleWithdrawKeepsOtherAssignmentsAndEdits(t *testing.T) {
+	_, project, _, _ := projectBundleFixture(t)
+	ids := []string{"claude", "codex"}
+	ok(t)(ProjectSkill(project, "triage", []string{"codex"}))
+	ok(t)(ProjectCopy(project, true))
+	ok(t)(ProjectBundle(project, "workbench", ids))
+	if again := ok(t)(ProjectBundle(project, "workbench", ids)); len(again.Writes) != 0 {
+		t.Fatalf("repeat enable wrote: %+v", again)
+	}
+	claudeSkill := filepath.Join(project, ".claude/skills/triage/SKILL.md")
+	claudeRole := filepath.Join(project, ".claude/agents/analyst.md")
+	claudeMCP := filepath.Join(project, ".mcp.json")
+	claudeHook := filepath.Join(project, ".claude/settings.local.json")
+	for file, edit := range map[string]func(string) string{
+		claudeSkill: func(s string) string { return s + "\nUser changed the skill.\n" },
+		claudeRole:  func(s string) string { return s + "\nUser changed the role.\n" },
+		claudeMCP:   func(s string) string { return strings.Replace(s, "triage-db.js", "my-tool.js", 1) },
+		claudeHook:  func(s string) string { return strings.Replace(s, "echo claude_fixture", "echo my_hook", 1) },
+	} {
+		original := read(t, file)
+		changed := edit(original)
+		if changed == original {
+			t.Fatalf("fixture did not change %s", file)
+		}
+		write(t, file, changed)
+	}
+	keep := map[string]string{}
+	for _, file := range []string{claudeSkill, claudeRole, claudeMCP, claudeHook, filepath.Join(project, ".agents/skills/triage/SKILL.md")} {
+		keep[file] = read(t, file)
+	}
+	plan := ok(t)(RemoveProjectBundle(project, "workbench", ids, ProjectWriteOptions{Preview: true}))
+	if len(plan.Problems) != 0 || !writesPath(plan, filepath.Join(project, ".codex/agents/analyst.toml")) {
+		t.Fatalf("withdraw preview: %+v", plan)
+	}
+	config := filepath.Join(project, ".codex/config.toml")
+	write(t, config, "model = 'fixture'\n"+read(t, config))
+	if _, err := RemoveProjectBundle(project, "workbench", ids, ProjectWriteOptions{PlanID: plan.PlanID}); err == nil || !strings.Contains(err.Error(), "plan changed") {
+		t.Fatalf("withdraw accepted a stale plan: %v", err)
+	}
+	plan = ok(t)(RemoveProjectBundle(project, "workbench", ids, ProjectWriteOptions{Preview: true}))
+	res := ok(t)(RemoveProjectBundle(project, "workbench", ids, ProjectWriteOptions{PlanID: plan.PlanID}))
+	if len(res.Problems) != 0 || res.PlanID != plan.PlanID {
+		t.Fatalf("withdraw apply: %+v", res)
+	}
+	for file, want := range keep {
+		if got := read(t, file); got != want {
+			t.Errorf("withdraw changed %s", file)
+		}
+	}
+	gone(t, filepath.Join(project, ".codex/agents/analyst.toml"))
+	if strings.Contains(read(t, filepath.Join(project, ".codex/hooks.json")), "codex_fixture") || strings.TrimSpace(read(t, config)) != "model = 'fixture'" {
+		t.Fatal("withdraw must take out its entries and keep the user's Codex setting")
+	}
+	if again := ok(t)(RemoveProjectBundle(project, "workbench", ids)); len(again.Writes) != 0 {
+		t.Fatalf("repeat withdrawal wrote: %+v", again)
+	}
+}
+
+func TestProjectBundleWithdrawSharesPiPackage(t *testing.T) {
+	_, project := piProjects(t)
+	source := filepath.Join(t.TempDir(), "fixture")
+	importPiBundleFixture(t, source, false)
+	aliasName := "other-bundle"
+	// The same Pi source imported under another bundle name is deliberately
+	// represented by a separate library folder.
+	write(t, filepath.Join(pluginDir(aliasName), "package.json"), read(t, filepath.Join(source, "package.json")))
+	ok(t)(changeProject(project, 0, func(l *Library) error {
+		l.Plugins = append(l.Plugins, &Plugin{Name: aliasName, Source: source})
+		return nil
+	}))
+	ids := []string{"pi"}
+	ok(t)(ProjectBundle(project, piBundleFixture, ids))
+	ok(t)(ProjectBundle(project, aliasName, ids))
+	if got := piList(t, project, "packages"); !slices.Equal(got, []string{pluginDir(piBundleFixture)}) {
+		t.Fatalf("a second bundle duplicated the Pi package: %v", got)
+	}
+	ok(t)(RemoveProjectBundle(project, piBundleFixture, ids))
+	if got := piList(t, project, "packages"); !slices.Equal(got, []string{pluginDir(piBundleFixture)}) {
+		t.Fatalf("the other bundle still uses this Pi package: %v", got)
+	}
+	ok(t)(RemoveProjectBundle(project, aliasName, ids))
+	if got := piList(t, project, "packages"); len(got) != 0 {
+		t.Fatalf("last owner left the Pi package behind: %v", got)
+	}
+
+	piPath := piProjectPath(project)
+	native := fmt.Sprintf(`{"packages":[{"source":%q,"skills":[]}]}`, source)
+	write(t, piPath, native)
+	ok(t)(ProjectBundle(project, piBundleFixture, ids))
+	ok(t)(RemoveProjectBundle(project, piBundleFixture, ids))
+	if read(t, piPath) != native {
+		t.Fatal("a Pi declaration that predated assignment was changed")
+	}
+}
+
+func TestProjectBundleWithdrawRespectsWorktreesAndAgentScope(t *testing.T) {
+	_, project, other, _ := projectBundleFixture(t)
+	tree := filepath.Join(t.TempDir(), "worktree")
+	projectWorktree(t, project, tree)
+	ok(t)(ProjectDistribute(project, ProjectDistribution{Skills: true, Subagents: true}))
+	ids := []string{"claude", "codex"}
+	ok(t)(ProjectBundle(project, "workbench", ids))
+	claudeSkill := ".claude/skills/triage/SKILL.md"
+	codexRole := ".codex/agents/analyst.toml"
+	if read(t, filepath.Join(tree, claudeSkill)) == "" || read(t, filepath.Join(tree, codexRole)) == "" {
+		t.Fatal("the opted-in worktree must receive these two resources")
+	}
+	ok(t)(ProjectDistribute(project, ProjectDistribution{}))
+	ok(t)(RemoveProjectBundle(project, "workbench", []string{"claude"}))
+	for _, dir := range []string{project, tree, other} {
+		gone(t, filepath.Join(dir, claudeSkill))
+	}
+	if read(t, filepath.Join(project, codexRole)) == "" || read(t, filepath.Join(tree, codexRole)) == "" {
+		t.Fatal("withdrawing Claude changed the Codex role")
+	}
+	ok(t)(RemoveProjectBundle(project, "workbench", []string{"codex"}))
+	for _, dir := range []string{project, tree, other} {
+		gone(t, filepath.Join(dir, codexRole))
+	}
+}
+
+func TestProjectBundleWithdrawKeepsEditedRouterEntry(t *testing.T) {
+	h, project, _, _ := projectBundleFixture(t)
+	write(t, filepath.Join(h, ".claude.json"), "{}")
+	ok(t)(SetMCPHub(true))
+	ids := []string{"claude", "codex"}
+	if res := ok(t)(ProjectBundle(project, "workbench", ids)); len(res.Problems) != 0 {
+		t.Fatalf("enable with router: %+v", res)
+	}
+	codex := filepath.Join(project, ProjectMCPFile("codex"))
+	config := read(t, codex)
+	if !strings.Contains(config, "[mcp_servers.magpie]") {
+		t.Fatal("bundle did not use the project router")
+	}
+	modified := strings.Replace(config, "/mcp/", "/my-router/", 1)
+	if modified == config {
+		modified = config + "enabled = false\n"
+	}
+	write(t, codex, modified)
+	res := ok(t)(RemoveProjectBundle(project, "workbench", ids))
+	if len(res.Problems) != 0 || read(t, codex) != modified {
+		t.Fatalf("withdraw changed the user's router entry: %+v", res)
+	}
+	record := claudeRecord(t, h, claudeRoot(project))
+	if entries, _ := record["mcpServers"].(map[string]any); entries[HubEntry] != nil {
+		t.Fatal("withdraw left its unedited Claude router entry")
 	}
 }

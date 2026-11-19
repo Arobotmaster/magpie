@@ -146,7 +146,20 @@ func (l *Library) syncProjectMCP(p *Project, hubs map[string]*Server, fail func(
 	if hs := hubs["codex"]; hs != nil {
 		want[codexOffRel] = append(want[codexOffRel], hs)
 	}
-	l.syncCodexOff(p, fail)
+	bundle := p.writes != nil && p.writes.bundleParts != nil
+	if !bundle {
+		l.syncCodexOff(p, fail)
+	}
+	if bundle && p.writes.bundleCodexHub {
+		had := slices.Contains(p.Wrote[codexOffRel], HubEntry)
+		known := p.BundleHubHashes["codex"] != ""
+		if hubs["codex"] == nil && !known || hubs["codex"] != nil && had && !known {
+			p.writes.bundleCodexHub = false
+		}
+	}
+	relevant := func(rel, name string) bool {
+		return p.bundleChanges("mcp", name, rel) || bundle && p.writes.bundleCodexHub && rel == codexOffRel && name == HubEntry
+	}
 	files := map[string]bool{}
 	for rel := range want {
 		files[rel] = true
@@ -168,10 +181,20 @@ func (l *Library) syncProjectMCP(p *Project, hubs map[string]*Server, fail func(
 			continue
 		}
 		abs := filepath.Join(p.Dir, filepath.FromSlash(rel))
-		dst, err := p.file(abs)
-		f := &mcpFile{Path: dst, Format: format, NoCmdRefs: rel == projectMCPFiles["droid"].rel}
 		had := p.Wrote[rel]
 		was := p.Startup[rel]
+		if bundle && !slices.ContainsFunc(had, func(name string) bool { return relevant(rel, name) }) &&
+			!slices.ContainsFunc(want[rel], func(s *Server) bool { return relevant(rel, s.Name) }) {
+			if len(had) != 0 {
+				wrote[rel] = had
+			}
+			if len(was) != 0 {
+				startup[rel] = was
+			}
+			continue
+		}
+		dst, err := p.file(abs)
+		f := &mcpFile{Path: dst, Format: format, NoCmdRefs: rel == projectMCPFiles["droid"].rel}
 		now := map[string]float64{}
 		var entries map[string]map[string]any
 		if err == nil {
@@ -189,11 +212,31 @@ func (l *Library) syncProjectMCP(p *Project, hubs map[string]*Server, fail func(
 		}
 		var mine []string
 		for _, name := range had {
+			if !relevant(rel, name) {
+				mine = append(mine, name)
+				now[name] = was[name]
+				continue
+			}
 			if slices.ContainsFunc(want[rel], func(s *Server) bool { return s.Name == name }) {
 				continue
 			}
+			if rel == codexOffRel && name == HubEntry {
+				if hash := p.BundleHubHashes["codex"]; hash != "" {
+					delete(p.BundleHubHashes, "codex")
+					if bundleMCPHash(entries[name]) != hash {
+						continue
+					}
+				}
+			}
 			if entries[name] == nil {
 				continue // taken out by hand: forgotten
+			}
+			edited := false
+			p.bundleMCPRecords(rel, name, func(a *projectBundleAssignment) {
+				edited = edited || a.MCPHash != "" && a.MCPHash != bundleMCPHash(entries[name])
+			})
+			if edited {
+				continue
 			}
 			if err := f.del(name); err != nil {
 				fail("mcp:"+name, err)
@@ -202,6 +245,9 @@ func (l *Library) syncProjectMCP(p *Project, hubs map[string]*Server, fail func(
 			}
 		}
 		for _, s := range want[rel] {
+			if !relevant(rel, s.Name) {
+				continue
+			}
 			s := wroteStartup(f.withCmdVars(s), was[s.Name])
 			old := entries[s.Name]
 			if old != nil && !slices.Contains(had, s.Name) {
@@ -209,6 +255,16 @@ func (l *Library) syncProjectMCP(p *Project, hubs map[string]*Server, fail func(
 				continue
 			}
 			if old != nil {
+				hubHash := p.BundleHubHashes["codex"]
+				edited := rel == codexOffRel && s.Name == HubEntry && hubHash != "" && hubHash != bundleMCPHash(old)
+				p.bundleMCPRecords(rel, s.Name, func(a *projectBundleAssignment) {
+					edited = edited || a.MCPHash != "" && a.MCPHash != bundleMCPHash(old)
+				})
+				if edited {
+					mine = append(mine, s.Name)
+					now[s.Name] = was[s.Name]
+					continue
+				}
 				if cur, ok := f.current(s.Name, old, s); ok && cur.same(s) && !f.behind(s, old) {
 					mine = append(mine, s.Name)
 					now[s.Name] = f.startupWritten(s, old)
@@ -234,6 +290,22 @@ func (l *Library) syncProjectMCP(p *Project, hubs map[string]*Server, fail func(
 			}
 			mine = append(mine, s.Name)
 			now[s.Name] = f.startupWritten(s, old)
+			if rel == codexOffRel && s.Name == HubEntry && (bundle && p.writes.bundleCodexHub || p.BundleHubHashes["codex"] != "") {
+				entries, err := f.entries()
+				if err != nil {
+					fail("mcp:"+s.Name, err)
+				} else {
+					p.setBundleHubHash("codex", entries[s.Name])
+				}
+			}
+			p.bundleMCPRecords(rel, s.Name, func(a *projectBundleAssignment) {
+				entries, err := f.entries()
+				if err != nil {
+					fail("mcp:"+s.Name, err)
+					return
+				}
+				a.MCPHash = bundleMCPHash(entries[s.Name])
+			})
 		}
 		sort.Strings(mine)
 		maps.DeleteFunc(now, func(_ string, v float64) bool { return v == 0 })
@@ -259,7 +331,7 @@ func (l *Library) syncProjectMCP(p *Project, hubs map[string]*Server, fail func(
 			p.MadeFiles = slices.Delete(p.MadeFiles, i, i+1)
 		}
 	}
-	if len(p.CodexOff) == 0 && wrote[codexOffRel] == nil {
+	if (!bundle || p.writes.bundleCodexHub) && len(p.CodexOff) == 0 && wrote[codexOffRel] == nil {
 		p.dropMadeFile(codexOffRel)
 	}
 	if len(wrote) == 0 {
@@ -319,6 +391,7 @@ func ProjectServer(dir, name string, agents []string, options ...ProjectWriteOpt
 			}
 			ids = set(ids, id, true)
 		}
+		p.forgetBundlePart("mcp", name)
 		if len(ids) == 0 {
 			delete(p.Servers, name)
 			return nil

@@ -50,6 +50,7 @@ func (l *Library) assignProjectPiBundle(p *Project, b *Plugin) ([]Problem, error
 		return nil, err
 	}
 	place := piPlace{dir: filepath.Dir(piProjectPath(p.Dir)), home: home()}
+	bundle := p.writes.bundleParts != nil
 	copied := piBundlePackageIdentity(place, root)
 	origin := piBundleOriginIdentity(place, b)
 	npm := ""
@@ -62,6 +63,19 @@ func (l *Library) assignProjectPiBundle(p *Project, b *Plugin) ([]Problem, error
 			continue
 		}
 		id := piBundlePackageIdentity(place, source)
+		part := projectBundlePart{Kind: "package", Name: source, Agent: "pi"}
+		if bundle && p.bundlePartAssigned(part) && slices.ContainsFunc(p.BundleAssignments, func(a projectBundleAssignment) bool {
+			if a.projectBundlePart != part {
+				return false
+			}
+			other := l.plugin(a.Bundle)
+			return id == copied || other != nil && origin != "" && piBundleOriginIdentity(place, other) == origin
+		}) && slices.ContainsFunc(p.PiEntries, func(e PiEntry) bool {
+			return e.Kind == "package" && e.Source == source && e.Raw == piRawOf(raw)
+		}) {
+			p.shareBundlePart(b.Name, part)
+			return nil, nil
+		}
 		if id != copied && id != origin && id != npm {
 			continue
 		}
@@ -71,6 +85,15 @@ func (l *Library) assignProjectPiBundle(p *Project, b *Plugin) ([]Problem, error
 			return nil, nil
 		}
 		return skip(fmt.Sprintf("the project already declares Pi package %s", source))
+	}
+	if bundle {
+		part := projectBundlePart{Kind: "package", Name: root, Agent: "pi"}
+		if p.bundlePartAssigned(part) {
+			return skip(fmt.Sprintf("the project already assigns Pi package %s", root))
+		}
+		p.assignBundlePart(b.Name, part)
+		p.PiEntries = append(p.PiEntries, PiEntry{Kind: "package", Source: root, Scope: ScopeProject})
+		return nil, nil
 	}
 	if p.Pi == nil {
 		p.Pi = map[string][]string{}

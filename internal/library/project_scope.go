@@ -164,6 +164,13 @@ func (l *Library) projectByKey(key string) *Project {
 // turns off in its disabledMcpServers; what magpie wrote there before and
 // no longer wants comes out, and nothing else of the record changes.
 func (l *Library) syncClaudeLocal(p *Project, hub *Server, fail func(what string, err error)) {
+	bundle := p.writes != nil && p.writes.bundleParts != nil
+	hash := p.BundleHubHashes["claude"]
+	if bundle && hash == "" {
+		if hub == nil || p.Claude != nil && slices.Contains(p.Claude.Servers, HubEntry) {
+			return
+		}
+	}
 	var want []string
 	for _, name := range offFor(p.ServersOff, "claude") {
 		if l.server(name) != nil {
@@ -214,6 +221,12 @@ func (l *Library) syncClaudeLocal(p *Project, hub *Server, fail func(what string
 		return
 	}
 	base := "projects." + k
+	var oldHub map[string]any
+	raw, hasHub := edit.GetJSONRaw(path, base+".mcpServers."+HubEntry)
+	if hasHub {
+		_ = json.Unmarshal([]byte(raw), &oldHub)
+	}
+	hubEdited := hash != "" && hasHub && hash != bundleMCPHash(oldHub)
 	if _, there := edit.GetJSONRaw(path, base); !there && (hub != nil || len(want) > 0) {
 		if err := edit.SetJSON(path, edit.KV{Path: base, Value: claudeDefaults()}); err != nil {
 			fail("claude", err)
@@ -230,26 +243,37 @@ func (l *Library) syncClaudeLocal(p *Project, hub *Server, fail func(what string
 		if hub != nil && name == hub.Name {
 			continue
 		}
+		if name == HubEntry && hash != "" {
+			delete(p.BundleHubHashes, "claude")
+			if hubEdited {
+				continue
+			}
+		}
 		if err := edit.DelJSON(path, base+".mcpServers."+name); err != nil {
 			fail("claude", err)
 			servers = append(servers, name)
 		}
 	}
 	if hub != nil {
-		var old map[string]any
-		if raw, ok := edit.GetJSONRaw(path, base+".mcpServers."+hub.Name); ok {
-			_ = json.Unmarshal([]byte(raw), &old)
-			if old != nil && !slices.Contains(rec.Servers, hub.Name) {
-				fail("claude", fmt.Errorf("Claude Code has a server called %s for %s already that isn't magpie's: it's left as it is", hub.Name, root))
-				old = nil
-				hub = nil
-			}
-		}
-		if hub != nil {
-			if err := edit.SetJSON(path, edit.KV{Path: base + ".mcpServers." + hub.Name, Value: (&mcpFile{Format: fmtClaude}).merged(hub, old)}); err != nil {
+		if oldHub != nil && !slices.Contains(rec.Servers, hub.Name) {
+			fail("claude", fmt.Errorf("Claude Code has a server called %s for %s already that isn't magpie's: it's left as it is", hub.Name, root))
+		} else if hubEdited {
+			servers = append(servers, hub.Name)
+		} else {
+			entry := (&mcpFile{Format: fmtClaude}).merged(hub, oldHub)
+			if err := edit.SetJSON(path, edit.KV{Path: base + ".mcpServers." + hub.Name, Value: entry}); err != nil {
 				fail("claude", err)
 			} else {
 				servers = append(servers, hub.Name)
+				if bundle || hash != "" {
+					raw, _ := edit.GetJSONRaw(path, base+".mcpServers."+HubEntry)
+					var written map[string]any
+					if err := json.Unmarshal([]byte(raw), &written); err != nil {
+						fail("claude", err)
+					} else {
+						p.setBundleHubHash("claude", written)
+					}
+				}
 			}
 		}
 	}
@@ -470,7 +494,14 @@ func (l *Library) syncTrees(p *Project, res *Result, parts projectParts) {
 		copyParts |= projectInstructions
 	}
 	copyParts &= parts
-	if copyParts == 0 && parts&projectLegacyCopies == 0 {
+	var withdrawn projectParts
+	for part, add := range p.writes.bundleParts {
+		if !add {
+			_, _, _, mask := part.assignment(p)
+			withdrawn |= mask & (projectSkills | projectRoles)
+		}
+	}
+	if copyParts == 0 && withdrawn == 0 && parts&projectLegacyCopies == 0 {
 		return
 	}
 	dirs := p.treeDirs()
@@ -501,7 +532,22 @@ func (l *Library) syncTrees(p *Project, res *Result, parts projectParts) {
 		if copyParts&projectInstructions != 0 {
 			t.Instr, t.InstrAgents = p.Instr, p.InstrAgents
 		}
-		treeParts := copyParts
+		// A disabled distribution switch prevents new copies. An explicit
+		// bundle withdrawal can still clean up its recorded copies.
+		if withdrawn&^copyParts != 0 {
+			for part, add := range p.writes.bundleParts {
+				items, key, value, mask := part.assignment(t)
+				if add || withdrawn&^copyParts&mask == 0 {
+					continue
+				}
+				if kept := set((*items)[key], value, false); len(kept) != 0 {
+					(*items)[key] = kept
+				} else {
+					delete(*items, key)
+				}
+			}
+		}
+		treeParts := copyParts | withdrawn
 		if parts&projectLegacyCopies != 0 && (len(t.Wrote) > 0 || len(t.CodexOff) > 0) {
 			// One explicit full sync takes back recorded MCP entries from
 			// the old automatic distribution. It never creates new ones.
